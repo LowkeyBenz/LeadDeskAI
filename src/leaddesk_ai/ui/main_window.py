@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QDoubleSpinBox,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 from leaddesk_ai.core.paths import DB_PATH
 from leaddesk_ai.db.repository import Repository
 from leaddesk_ai.services.backup import create_backup
+from leaddesk_ai.services.calculations import analyze_deal
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +83,7 @@ class PropertyDialog(QDialog):
         self.tabs.addTab(self.workflow_tab(), "Workflow")
         self.tabs.addTab(self.notes_tab(), "Notes")
         self.tabs.addTab(self.tasks_tab(), "Tasks")
+        self.tabs.addTab(self.deal_analyzer_tab(), "Deal Analyzer")
         self.tabs.addTab(self.activity_tab(), "Activity")
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -128,6 +131,50 @@ class PropertyDialog(QDialog):
         actions.addWidget(add); actions.addWidget(complete); actions.addStretch(); layout.addLayout(actions)
         return page
 
+    def deal_analyzer_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page); form = QFormLayout()
+        def money(default=0.0):
+            w = QDoubleSpinBox(); w.setRange(0, 100000000); w.setDecimals(2); w.setPrefix("$"); w.setValue(default); return w
+        self.deal_arv = money(); self.deal_purchase = money(); self.deal_repairs = money()
+        self.deal_closing = money(); self.deal_holding = money(); self.deal_marketing = money(); self.deal_misc = money()
+        self.deal_fee = money(10000); self.deal_target = QDoubleSpinBox(); self.deal_target.setRange(0,100); self.deal_target.setDecimals(1); self.deal_target.setSuffix("%"); self.deal_target.setValue(70)
+        for label, widget in [("After Repair Value (ARV)",self.deal_arv),("Purchase price",self.deal_purchase),("Repairs",self.deal_repairs),
+                              ("Closing costs",self.deal_closing),("Holding costs",self.deal_holding),("Marketing costs",self.deal_marketing),
+                              ("Miscellaneous costs",self.deal_misc),("Assignment fee target",self.deal_fee),("Buyer target percentage",self.deal_target)]: form.addRow(label,widget)
+        layout.addLayout(form)
+        actions=QHBoxLayout(); calc=QPushButton("Calculate"); calc.clicked.connect(self.calculate_deal); save=QPushButton("Save Analysis"); save.clicked.connect(self.save_deal)
+        actions.addWidget(calc); actions.addWidget(save); actions.addStretch(); layout.addLayout(actions)
+        self.deal_summary=QLabel("Enter deal numbers and click Calculate."); self.deal_summary.setWordWrap(True); self.deal_summary.setTextInteractionFlags(Qt.TextSelectableByMouse); layout.addWidget(self.deal_summary)
+        self.deal_history=QTableWidget(0,7); self.deal_history.setHorizontalHeaderLabels(["ID","Created","ARV","Purchase","MAO","Profit","Score"]); self.deal_history.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.deal_history,1); return page
+
+    def _deal_values(self):
+        return dict(arv=self.deal_arv.value(), purchase_price=self.deal_purchase.value(), repairs=self.deal_repairs.value(),
+                    closing_costs=self.deal_closing.value(), holding_costs=self.deal_holding.value(), marketing_costs=self.deal_marketing.value(),
+                    misc_costs=self.deal_misc.value(), wholesale_fee=self.deal_fee.value(), target_pct=self.deal_target.value())
+
+    def calculate_deal(self):
+        try:
+            result=analyze_deal(**self._deal_values())
+            self.deal_summary.setText(f"MAO: ${result['mao']:,.2f}   |   Buyer price: ${result['buyer_price']:,.2f}\nTotal costs: ${result['total_costs']:,.2f}   |   Total investment: ${result['total_investment']:,.2f}\nProjected profit: ${result['projected_profit']:,.2f}   |   ROI: {result['roi']:.2f}%   |   Score: {result['deal_score']}")
+            return result
+        except ValueError as exc:
+            QMessageBox.warning(self,"Cannot calculate",str(exc)); return None
+
+    def save_deal(self):
+        if self.calculate_deal() is None: return
+        try:
+            self.repo.save_deal_analysis(self.property_id, **self._deal_values())
+            self.refresh_deals(); self.refresh_activity(); QMessageBox.information(self,"Saved","Deal analysis saved to this property.")
+        except ValueError as exc: QMessageBox.warning(self,"Cannot save",str(exc))
+
+    def refresh_deals(self):
+        rows=self.repo.list_deal_analyses(self.property_id); self.deal_history.setRowCount(len(rows))
+        for r,item in enumerate(rows):
+            vals=[item['id'],item['created_at'],f"${item['arv']:,.2f}",f"${item['purchase_price']:,.2f}",f"${item['mao']:,.2f}",f"${item['projected_profit']:,.2f}",item['deal_score']]
+            for c,val in enumerate(vals): self.deal_history.setItem(r,c,QTableWidgetItem(str(val)))
+        self.deal_history.resizeColumnsToContents()
+
     def activity_tab(self):
         page = QWidget(); layout = QVBoxLayout(page); self.activity_history = QTextEdit(); self.activity_history.setReadOnly(True); layout.addWidget(self.activity_history); return page
 
@@ -140,7 +187,7 @@ class PropertyDialog(QDialog):
             widget.setText(str(d[key] or ''))
         self.status.setCurrentText(d['status'] or 'New'); self.priority.setCurrentText(d['priority'] or 'Normal'); self.follow_up.setText(d['follow_up_date'] or '')
         self.internal_dnc.setChecked(bool(d['internal_dnc'])); self.opt_out.setChecked(bool(d['opt_out']))
-        self.refresh_notes(); self.refresh_tasks(); self.refresh_activity()
+        self.refresh_notes(); self.refresh_tasks(); self.refresh_deals(); self.refresh_activity()
 
     def save_profile(self):
         try:
@@ -294,7 +341,7 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self.repo = repo
-        self.setWindowTitle("LeadDesk AI 3.2 — Property Workspace")
+        self.setWindowTitle("LeadDesk AI 3.3 — Deal Analyzer")
         self.resize(1320, 800)
         root = QWidget()
         self.setCentralWidget(root)
@@ -349,11 +396,11 @@ class MainWindow(QMainWindow):
     def about_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("LeadDesk AI 3.2 Property Workspace")
+        title = QLabel("LeadDesk AI 3.3 Deal Analyzer")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         label = QLabel(
-            "Lead CRM • Property Workspace • editable property and owner profiles • tasks • activity timeline • notes • workflow controls • tested backups\n\n"
+            "Lead CRM • Property Workspace • Deal Analyzer • saved deal history • tasks • activity timeline • notes • workflow controls • tested backups\n\n"
             "This application supports organization and analysis. It does not provide legal advice or automatically authorize calls, texts, emails, contracts, or negotiations."
         )
         label.setWordWrap(True)

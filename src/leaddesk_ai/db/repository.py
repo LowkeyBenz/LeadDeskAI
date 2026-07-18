@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 from .schema import SCHEMA_SQL, SCHEMA_VERSION
 from leaddesk_ai.core.paths import DB_PATH
+from leaddesk_ai.services.calculations import analyze_deal
 
 
 def now() -> str:
@@ -31,6 +32,7 @@ class Repository:
     def initialize(self) -> None:
         self.conn.executescript(SCHEMA_SQL)
         self._ensure_property_columns()
+        self._ensure_deal_columns()
         row = self.conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
         if row is None:
             self.conn.execute("INSERT INTO schema_meta(version) VALUES(?)", (SCHEMA_VERSION,))
@@ -56,6 +58,21 @@ class Repository:
         for column, definition in additions.items():
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE properties ADD COLUMN {column} {definition}")
+
+    def _ensure_deal_columns(self) -> None:
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(deals)")}
+        additions = {
+            "purchase_price": "REAL NOT NULL DEFAULT 0",
+            "marketing_costs": "REAL NOT NULL DEFAULT 0",
+            "misc_costs": "REAL NOT NULL DEFAULT 0",
+            "total_investment": "REAL NOT NULL DEFAULT 0",
+            "projected_profit": "REAL NOT NULL DEFAULT 0",
+            "roi": "REAL NOT NULL DEFAULT 0",
+            "deal_score": "TEXT NOT NULL DEFAULT 'Marginal'",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE deals ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         self.conn.close()
@@ -376,3 +393,37 @@ class Repository:
 
     def activities(self, property_id: int) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM activities WHERE property_id=? ORDER BY id DESC", (property_id,)))
+    def save_deal_analysis(
+        self, property_id: int, *, arv: float, purchase_price: float, repairs: float = 0,
+        closing_costs: float = 0, holding_costs: float = 0, marketing_costs: float = 0,
+        misc_costs: float = 0, wholesale_fee: float = 10000, target_pct: float = 0.70,
+    ) -> int:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        summary = analyze_deal(
+            arv=arv, purchase_price=purchase_price, repairs=repairs, closing_costs=closing_costs,
+            holding_costs=holding_costs, marketing_costs=marketing_costs, misc_costs=misc_costs,
+            wholesale_fee=wholesale_fee, target_pct=target_pct,
+        )
+        pct = target_pct / 100 if target_pct > 1 else target_pct
+        stamp = now()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO deals(property_id,arv,repairs,target_pct,wholesale_fee,closing_costs,holding_costs,buyer_price,
+                purchase_price,marketing_costs,misc_costs,mao,total_investment,projected_profit,roi,deal_score,status,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (property_id, arv, repairs, pct, wholesale_fee, closing_costs, holding_costs, summary["buyer_price"],
+                 purchase_price, marketing_costs, misc_costs, summary["mao"], summary["total_investment"],
+                 summary["projected_profit"], summary["roi"], summary["deal_score"], "Analyzing", stamp),
+            )
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, "Deal Analysis Saved", f"MAO: ${summary['mao']:,.2f}; Profit: ${summary['projected_profit']:,.2f}; Score: {summary['deal_score']}", "admin", stamp),
+            )
+        deal_id = int(cur.lastrowid)
+        self.audit("save_deal_analysis", "deal", deal_id, after={"property_id": property_id, **summary})
+        return deal_id
+
+    def list_deal_analyses(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM deals WHERE property_id=? ORDER BY id DESC", (property_id,)))
+
