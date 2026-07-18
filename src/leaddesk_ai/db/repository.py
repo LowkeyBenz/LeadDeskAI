@@ -261,3 +261,118 @@ class Repository:
         repo.record_event("v2_migration", {"source": str(source), "properties": count})
         repo.close()
         return count
+
+    def update_property_profile(
+        self,
+        property_id: int,
+        *,
+        address: str,
+        city: str = "",
+        state: str = "",
+        zip_code: str = "",
+        county: str = "",
+        apn: str = "",
+        property_type: str = "",
+        owner_name: str = "",
+        mailing_address: str = "",
+        phone: str = "",
+        email: str = "",
+    ) -> None:
+        address = address.strip()
+        if not address:
+            raise ValueError("Property address is required.")
+        before = self.property_details(property_id)
+        if before is None:
+            raise ValueError("Property not found.")
+        stamp = now()
+        with self.conn:
+            self.conn.execute(
+                """UPDATE properties SET address=?,city=?,state=?,zip=?,county=?,apn=?,property_type=?,updated_at=? WHERE id=?""",
+                (address.strip(), city.strip(), state.strip(), zip_code.strip(), county.strip(), apn.strip(), property_type.strip(), stamp, property_id),
+            )
+            owner = self.conn.execute("SELECT id FROM owners WHERE property_id=? ORDER BY id LIMIT 1", (property_id,)).fetchone()
+            if owner:
+                owner_id = int(owner["id"])
+                self.conn.execute(
+                    "UPDATE owners SET name=?,mailing_address=? WHERE id=?",
+                    (owner_name.strip(), mailing_address.strip(), owner_id),
+                )
+            else:
+                cur = self.conn.execute(
+                    "INSERT INTO owners(property_id,name,mailing_address,created_at) VALUES(?,?,?,?)",
+                    (property_id, owner_name.strip(), mailing_address.strip(), stamp),
+                )
+                owner_id = int(cur.lastrowid)
+            self._upsert_primary_contact(owner_id, "phone", phone.strip(), stamp)
+            self._upsert_primary_contact(owner_id, "email", email.strip(), stamp)
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, "Profile Updated", "Property and owner profile updated", "admin", stamp),
+            )
+        self.audit("update_property_profile", "property", property_id, before=dict(before), after={"address": address, "owner_name": owner_name})
+
+    def _upsert_primary_contact(self, owner_id: int, contact_type: str, value: str, stamp: str) -> None:
+        row = self.conn.execute(
+            "SELECT id FROM contacts WHERE owner_id=? AND type=? ORDER BY is_primary DESC,id LIMIT 1",
+            (owner_id, contact_type),
+        ).fetchone()
+        if row:
+            if value:
+                self.conn.execute("UPDATE contacts SET value=?,is_primary=1 WHERE id=?", (value, int(row["id"])))
+            else:
+                self.conn.execute("DELETE FROM contacts WHERE id=?", (int(row["id"]),))
+        elif value:
+            self.conn.execute(
+                "INSERT INTO contacts(owner_id,type,value,label,is_clean,is_primary,created_at) VALUES(?,?,?,'Manual',0,1,?)",
+                (owner_id, contact_type, value, stamp),
+            )
+
+    def add_task(self, property_id: int, title: str, due_date: str = "", priority: str = "Normal") -> int:
+        title = title.strip()
+        if not title:
+            raise ValueError("Task title is required.")
+        if priority not in self.PRIORITIES:
+            raise ValueError("Invalid priority.")
+        if due_date:
+            try:
+                datetime.strptime(due_date, "%Y-%m-%d")
+            except ValueError as exc:
+                raise ValueError("Task due date must use YYYY-MM-DD.") from exc
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        stamp = now()
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO tasks(property_id,title,due_date,status,priority,created_at) VALUES(?,?,?,'Open',?,?)",
+                (property_id, title, due_date, priority, stamp),
+            )
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, "Task Added", title, "admin", stamp),
+            )
+        self.audit("add_task", "task", int(cur.lastrowid), after={"property_id": property_id, "title": title})
+        return int(cur.lastrowid)
+
+    def list_tasks(self, property_id: int, include_completed: bool = True) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM tasks WHERE property_id=?"
+        args: list[Any] = [property_id]
+        if not include_completed:
+            sql += " AND status='Open'"
+        sql += " ORDER BY CASE status WHEN 'Open' THEN 1 ELSE 2 END, CASE priority WHEN 'Urgent' THEN 1 WHEN 'High' THEN 2 WHEN 'Normal' THEN 3 ELSE 4 END, due_date, id DESC"
+        return list(self.conn.execute(sql, args))
+
+    def set_task_completed(self, task_id: int, completed: bool = True) -> None:
+        task = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if task is None:
+            raise ValueError("Task not found.")
+        status = "Completed" if completed else "Open"
+        with self.conn:
+            self.conn.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (task["property_id"], "Task Completed" if completed else "Task Reopened", task["title"], "admin", now()),
+            )
+        self.audit("complete_task" if completed else "reopen_task", "task", task_id, after={"status": status})
+
+    def activities(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM activities WHERE property_id=? ORDER BY id DESC", (property_id,)))

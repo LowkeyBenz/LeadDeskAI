@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -68,86 +69,124 @@ class PropertyDialog(QDialog):
         super().__init__(parent)
         self.repo = repo
         self.property_id = property_id
-        self.setWindowTitle(f"Lead Workspace — Property {property_id}")
-        self.resize(680, 620)
-        layout = QVBoxLayout(self)
-        details = repo.property_details(property_id)
-        if details is None:
-            raise ValueError("Property not found.")
-
-        heading = QLabel(f"{details['address']}, {details['city']}, {details['state']} {details['zip']}")
-        heading.setObjectName("pageTitle")
-        layout.addWidget(heading)
-        owner = QLabel(f"Owner: {details['owner_name'] or 'Unknown'}\nPhone: {details['phone'] or '—'}\nEmail: {details['email'] or '—'}")
-        owner.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(owner)
-
-        form = QFormLayout()
-        self.status = QComboBox()
-        self.status.addItems(repo.PROPERTY_STATUSES)
-        self.status.setCurrentText(details["status"] or "New")
-        self.priority = QComboBox()
-        self.priority.addItems(repo.PRIORITIES)
-        self.priority.setCurrentText(details["priority"] or "Normal")
-        self.follow_up = QLineEdit(details["follow_up_date"] or "")
-        self.follow_up.setPlaceholderText("YYYY-MM-DD")
-        self.internal_dnc = QCheckBox("Internal do-not-contact")
-        self.internal_dnc.setChecked(bool(details["internal_dnc"]))
-        self.opt_out = QCheckBox("Contact opted out")
-        self.opt_out.setChecked(bool(details["opt_out"]))
-        form.addRow("Status", self.status)
-        form.addRow("Priority", self.priority)
-        form.addRow("Follow-up date", self.follow_up)
-        form.addRow("Restrictions", self.internal_dnc)
-        form.addRow("", self.opt_out)
-        layout.addLayout(form)
-
-        save = QPushButton("Save Lead Workflow")
-        save.clicked.connect(self.save_workflow)
-        layout.addWidget(save)
-
-        notes_label = QLabel("Notes")
-        notes_label.setStyleSheet("font-weight: 700; font-size: 16px;")
-        layout.addWidget(notes_label)
-        self.history = QTextEdit()
-        self.history.setReadOnly(True)
-        layout.addWidget(self.history, 1)
-        self.note = QTextEdit()
-        self.note.setPlaceholderText("Add a seller conversation note, property detail, or next step")
-        self.note.setMaximumHeight(100)
-        layout.addWidget(self.note)
-        add_note = QPushButton("Add Note")
-        add_note.clicked.connect(self.add_note)
-        layout.addWidget(add_note)
+        self.setWindowTitle(f"Property Workspace — {property_id}")
+        self.resize(860, 720)
+        self.layout = QVBoxLayout(self)
+        self.heading = QLabel()
+        self.heading.setObjectName("pageTitle")
+        self.layout.addWidget(self.heading)
+        self.tabs = QTabWidget()
+        self.layout.addWidget(self.tabs, 1)
+        self.tabs.addTab(self.profile_tab(), "Profile")
+        self.tabs.addTab(self.workflow_tab(), "Workflow")
+        self.tabs.addTab(self.notes_tab(), "Notes")
+        self.tabs.addTab(self.tasks_tab(), "Tasks")
+        self.tabs.addTab(self.activity_tab(), "Activity")
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self.refresh_notes()
+        self.layout.addWidget(buttons)
+        self.refresh_all()
+
+    def profile_tab(self):
+        page = QWidget(); form = QFormLayout(page)
+        self.address = QLineEdit(); self.city = QLineEdit(); self.state = QLineEdit(); self.zip_code = QLineEdit()
+        self.county = QLineEdit(); self.apn = QLineEdit(); self.property_type = QLineEdit()
+        self.owner_name = QLineEdit(); self.mailing_address = QLineEdit(); self.phone = QLineEdit(); self.email = QLineEdit()
+        for label, widget in [("Property address", self.address), ("City", self.city), ("State", self.state), ("ZIP", self.zip_code),
+                              ("County", self.county), ("APN", self.apn), ("Property type", self.property_type),
+                              ("Owner name", self.owner_name), ("Mailing address", self.mailing_address),
+                              ("Phone", self.phone), ("Email", self.email)]: form.addRow(label, widget)
+        save = QPushButton("Save Property Profile"); save.clicked.connect(self.save_profile); form.addRow(save)
+        return page
+
+    def workflow_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page); form = QFormLayout()
+        self.status = QComboBox(); self.status.addItems(self.repo.PROPERTY_STATUSES)
+        self.priority = QComboBox(); self.priority.addItems(self.repo.PRIORITIES)
+        self.follow_up = QLineEdit(); self.follow_up.setPlaceholderText("YYYY-MM-DD")
+        self.internal_dnc = QCheckBox("Internal do-not-contact"); self.opt_out = QCheckBox("Contact opted out")
+        form.addRow("Status", self.status); form.addRow("Priority", self.priority); form.addRow("Follow-up date", self.follow_up)
+        form.addRow("Restrictions", self.internal_dnc); form.addRow("", self.opt_out); layout.addLayout(form)
+        save = QPushButton("Save Workflow"); save.clicked.connect(self.save_workflow); layout.addWidget(save); layout.addStretch()
+        return page
+
+    def notes_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        self.history = QTextEdit(); self.history.setReadOnly(True); layout.addWidget(self.history, 1)
+        self.note = QTextEdit(); self.note.setPlaceholderText("Add a seller conversation note, property detail, or next step"); self.note.setMaximumHeight(110)
+        layout.addWidget(self.note); add = QPushButton("Add Note"); add.clicked.connect(self.add_note); layout.addWidget(add)
+        return page
+
+    def tasks_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        self.tasks_table = QTableWidget(0, 5); self.tasks_table.setHorizontalHeaderLabels(["ID", "Task", "Due", "Priority", "Status"])
+        self.tasks_table.setSelectionBehavior(QAbstractItemView.SelectRows); self.tasks_table.setEditTriggers(QAbstractItemView.NoEditTriggers); layout.addWidget(self.tasks_table, 1)
+        form = QFormLayout(); self.task_title = QLineEdit(); self.task_due = QLineEdit(); self.task_due.setPlaceholderText("YYYY-MM-DD")
+        self.task_priority = QComboBox(); self.task_priority.addItems(self.repo.PRIORITIES)
+        form.addRow("Task", self.task_title); form.addRow("Due date", self.task_due); form.addRow("Priority", self.task_priority); layout.addLayout(form)
+        actions = QHBoxLayout(); add = QPushButton("Add Task"); add.clicked.connect(self.add_task); complete = QPushButton("Mark Completed"); complete.clicked.connect(self.complete_task)
+        actions.addWidget(add); actions.addWidget(complete); actions.addStretch(); layout.addLayout(actions)
+        return page
+
+    def activity_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page); self.activity_history = QTextEdit(); self.activity_history.setReadOnly(True); layout.addWidget(self.activity_history); return page
+
+    def refresh_all(self):
+        d = self.repo.property_details(self.property_id)
+        if d is None: return
+        self.heading.setText(f"{d['address']}, {d['city']}, {d['state']} {d['zip']}")
+        for widget, key in [(self.address,'address'),(self.city,'city'),(self.state,'state'),(self.zip_code,'zip'),(self.county,'county'),(self.apn,'apn'),
+                            (self.property_type,'property_type'),(self.owner_name,'owner_name'),(self.mailing_address,'mailing_address'),(self.phone,'phone'),(self.email,'email')]:
+            widget.setText(str(d[key] or ''))
+        self.status.setCurrentText(d['status'] or 'New'); self.priority.setCurrentText(d['priority'] or 'Normal'); self.follow_up.setText(d['follow_up_date'] or '')
+        self.internal_dnc.setChecked(bool(d['internal_dnc'])); self.opt_out.setChecked(bool(d['opt_out']))
+        self.refresh_notes(); self.refresh_tasks(); self.refresh_activity()
+
+    def save_profile(self):
+        try:
+            self.repo.update_property_profile(self.property_id, address=self.address.text(), city=self.city.text(), state=self.state.text(),
+                zip_code=self.zip_code.text(), county=self.county.text(), apn=self.apn.text(), property_type=self.property_type.text(),
+                owner_name=self.owner_name.text(), mailing_address=self.mailing_address.text(), phone=self.phone.text(), email=self.email.text())
+            self.refresh_all(); QMessageBox.information(self, "Saved", "Property and owner profile saved.")
+        except ValueError as exc: QMessageBox.warning(self, "Cannot save", str(exc))
 
     def save_workflow(self):
         try:
-            self.repo.update_property_workflow(
-                self.property_id,
-                self.status.currentText(),
-                self.priority.currentText(),
-                self.follow_up.text().strip(),
-            )
+            self.repo.update_property_workflow(self.property_id, self.status.currentText(), self.priority.currentText(), self.follow_up.text().strip())
             self.repo.set_contact_restrictions(self.property_id, self.internal_dnc.isChecked(), self.opt_out.isChecked())
-            QMessageBox.information(self, "Saved", "Lead workflow and contact restrictions were saved.")
-        except ValueError as exc:
-            QMessageBox.warning(self, "Cannot save", str(exc))
+            self.refresh_activity(); QMessageBox.information(self, "Saved", "Workflow and restrictions saved.")
+        except ValueError as exc: QMessageBox.warning(self, "Cannot save", str(exc))
 
     def add_note(self):
         try:
-            self.repo.add_note(self.property_id, self.note.toPlainText())
-            self.note.clear()
-            self.refresh_notes()
-        except ValueError as exc:
-            QMessageBox.warning(self, "Cannot save", str(exc))
+            self.repo.add_note(self.property_id, self.note.toPlainText()); self.note.clear(); self.refresh_notes(); self.refresh_activity()
+        except ValueError as exc: QMessageBox.warning(self, "Cannot save", str(exc))
 
     def refresh_notes(self):
-        notes = self.repo.notes(self.property_id)
-        self.history.setPlainText("\n\n".join(f"{n['created_at']} — {n['body']}" for n in notes) or "No notes yet.")
+        notes = self.repo.notes(self.property_id); self.history.setPlainText("\n\n".join(f"{n['created_at']} — {n['body']}" for n in notes) or "No notes yet.")
+
+    def add_task(self):
+        try:
+            self.repo.add_task(self.property_id, self.task_title.text(), self.task_due.text().strip(), self.task_priority.currentText())
+            self.task_title.clear(); self.task_due.clear(); self.refresh_tasks(); self.refresh_activity()
+        except ValueError as exc: QMessageBox.warning(self, "Cannot add task", str(exc))
+
+    def selected_task_id(self):
+        row = self.tasks_table.currentRow(); return int(self.tasks_table.item(row, 0).text()) if row >= 0 else None
+
+    def complete_task(self):
+        task_id = self.selected_task_id()
+        if not task_id: QMessageBox.information(self, "Select task", "Select a task first."); return
+        self.repo.set_task_completed(task_id, True); self.refresh_tasks(); self.refresh_activity()
+
+    def refresh_tasks(self):
+        rows = self.repo.list_tasks(self.property_id); self.tasks_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            for c, value in enumerate([item['id'], item['title'], item['due_date'], item['priority'], item['status']]): self.tasks_table.setItem(r,c,QTableWidgetItem(str(value or '')))
+        self.tasks_table.resizeColumnsToContents()
+
+    def refresh_activity(self):
+        rows = self.repo.activities(self.property_id); self.activity_history.setPlainText("\n\n".join(f"{r['created_at']} — {r['activity_type']}\n{r['details']}" for r in rows) or "No activity yet.")
 
 
 class PropertiesPage(QWidget):
@@ -255,7 +294,7 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self.repo = repo
-        self.setWindowTitle("LeadDesk AI 3.1 — Revenue MVP")
+        self.setWindowTitle("LeadDesk AI 3.2 — Property Workspace")
         self.resize(1320, 800)
         root = QWidget()
         self.setCentralWidget(root)
@@ -310,11 +349,11 @@ class MainWindow(QMainWindow):
     def about_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("LeadDesk AI 3.1 Revenue MVP")
+        title = QLabel("LeadDesk AI 3.2 Property Workspace")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         label = QLabel(
-            "Lead CRM • CSV import • duplicate protection • workflow statuses • priority • follow-up dates • notes • contact restrictions • tested backups\n\n"
+            "Lead CRM • Property Workspace • editable property and owner profiles • tasks • activity timeline • notes • workflow controls • tested backups\n\n"
             "This application supports organization and analysis. It does not provide legal advice or automatically authorize calls, texts, emails, contracts, or negotiations."
         )
         label.setWordWrap(True)
@@ -339,7 +378,7 @@ class MainWindow(QMainWindow):
             self.properties.repo = self.repo
             self.dashboard.refresh()
             self.properties.refresh()
-            QMessageBox.information(self, "Migration complete", f"Migrated {count} properties into LeadDesk AI 3.1.")
+            QMessageBox.information(self, "Migration complete", f"Migrated {count} properties into LeadDesk AI 3.2.")
         except Exception as exc:
             log.exception("Migration failed")
             self.repo = Repository(DB_PATH)
