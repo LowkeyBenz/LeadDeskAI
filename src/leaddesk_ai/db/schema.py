@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys=ON;
@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS properties(
  id INTEGER PRIMARY KEY, lead_code TEXT UNIQUE, market TEXT DEFAULT '', county TEXT DEFAULT '',
  address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '', apn TEXT DEFAULT '',
  property_type TEXT DEFAULT '', bedrooms REAL, bathrooms REAL, square_feet REAL,
- source_file TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'New', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+ source_file TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'New', priority TEXT NOT NULL DEFAULT 'Normal',
+ follow_up_date TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS owners(
  id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,

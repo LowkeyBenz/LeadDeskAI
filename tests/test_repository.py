@@ -6,7 +6,7 @@ def test_database_initializes(tmp_path: Path):
     repo = Repository(tmp_path / "test.db")
     assert repo.stats()["properties"] == 0
     version = repo.conn.execute("SELECT version FROM schema_meta").fetchone()[0]
-    assert version == 5
+    assert version == 6
     repo.close()
 
 
