@@ -68,3 +68,28 @@ def analyze_deal(
         "roi": roi,
         "deal_score": score,
     }
+
+
+def estimate_arv(comps: list[dict], subject_square_feet: float = 0) -> dict[str, float]:
+    """Estimate ARV from selected comparable sales.
+
+    Uses average sold price when subject square footage is unavailable. When it
+    is supplied and valid comp square footage exists, average price per square
+    foot is applied to the subject property.
+    """
+    usable = [c for c in comps if c.get("selected", True) and float(c.get("sold_price") or 0) > 0]
+    if not usable:
+        raise ValueError("Select at least one comparable sale with a sold price.")
+    prices = [float(c["sold_price"]) for c in usable]
+    ppsf = [float(c["sold_price"]) / float(c["square_feet"]) for c in usable if float(c.get("square_feet") or 0) > 0]
+    average_price = sum(prices) / len(prices)
+    average_ppsf = sum(ppsf) / len(ppsf) if ppsf else 0.0
+    suggested = average_ppsf * float(subject_square_feet) if average_ppsf and float(subject_square_feet or 0) > 0 else average_price
+    return {
+        "comp_count": len(usable),
+        "average_price": round(average_price, 2),
+        "average_ppsf": round(average_ppsf, 2),
+        "suggested_arv": round(suggested, 2),
+        "low_arv": round(min(prices), 2),
+        "high_arv": round(max(prices), 2),
+    }

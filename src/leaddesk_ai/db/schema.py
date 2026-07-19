@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys=ON;
@@ -44,8 +44,8 @@ CREATE TABLE IF NOT EXISTS tasks(
 CREATE TABLE IF NOT EXISTS comparable_sales(
  id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
  address TEXT NOT NULL, sold_price REAL NOT NULL DEFAULT 0, sold_date TEXT DEFAULT '', square_feet REAL,
- distance_miles REAL, condition_notes TEXT DEFAULT '', source TEXT DEFAULT '', verified INTEGER NOT NULL DEFAULT 0,
- created_at TEXT NOT NULL
+ distance_miles REAL, bedrooms REAL, bathrooms REAL, lot_size REAL, condition_notes TEXT DEFAULT '', source TEXT DEFAULT '',
+ verified INTEGER NOT NULL DEFAULT 0, selected INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS repair_estimates(
  id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
@@ -81,6 +81,12 @@ CREATE TABLE IF NOT EXISTS buyer_offers(
  proof_of_funds INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'New', notes TEXT DEFAULT '', sent_date TEXT DEFAULT '', responded_date TEXT DEFAULT '',
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS offer_scenarios(
+ id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+ suggested_arv REAL NOT NULL DEFAULT 0, seller_offer REAL NOT NULL DEFAULT 0,
+ buyer_price REAL NOT NULL DEFAULT 0, assignment_fee REAL NOT NULL DEFAULT 0,
+ estimated_profit REAL NOT NULL DEFAULT 0, notes TEXT DEFAULT '', created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS campaigns(
  id INTEGER PRIMARY KEY, name TEXT NOT NULL, channel TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
  total_records INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL
@@ -95,4 +101,6 @@ CREATE TABLE IF NOT EXISTS app_events(
 CREATE INDEX IF NOT EXISTS idx_properties_address ON properties(address,city,state,zip);
 CREATE INDEX IF NOT EXISTS idx_contacts_value ON contacts(value);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status,due_date);
+CREATE INDEX IF NOT EXISTS idx_comps_property ON comparable_sales(property_id);
+CREATE INDEX IF NOT EXISTS idx_offers_property ON offer_scenarios(property_id,id);
 """

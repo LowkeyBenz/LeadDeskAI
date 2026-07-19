@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from .schema import SCHEMA_SQL, SCHEMA_VERSION
 from leaddesk_ai.core.paths import DB_PATH
-from leaddesk_ai.services.calculations import analyze_deal
+from leaddesk_ai.services.calculations import analyze_deal, estimate_arv
 
 
 def now() -> str:
@@ -34,6 +34,7 @@ class Repository:
         self._ensure_property_columns()
         self._ensure_deal_columns()
         self._ensure_buyer_offer_columns()
+        self._ensure_comparable_columns()
         row = self.conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
         if row is None:
             self.conn.execute("INSERT INTO schema_meta(version) VALUES(?)", (SCHEMA_VERSION,))
@@ -84,6 +85,16 @@ class Repository:
         for column, definition in additions.items():
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE buyer_offers ADD COLUMN {column} {definition}")
+
+    def _ensure_comparable_columns(self) -> None:
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(comparable_sales)")}
+        additions = {
+            "bedrooms": "REAL", "bathrooms": "REAL", "lot_size": "REAL",
+            "selected": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE comparable_sales ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         self.conn.close()
@@ -439,6 +450,74 @@ class Repository:
         return list(self.conn.execute("SELECT * FROM deals WHERE property_id=? ORDER BY id DESC", (property_id,)))
     # --- Buyer CRM and offer pipeline ---
     BUYER_OFFER_STATUSES = ("New", "Sent", "Opened", "Interested", "Negotiating", "Under Contract", "Closed", "Passed")
+
+    # ---------- Comparable sales and offer builder ----------
+    def add_comparable_sale(self, property_id: int, *, address: str, sold_price: float, sold_date: str = "",
+                            square_feet: float = 0, bedrooms: float = 0, bathrooms: float = 0,
+                            lot_size: float = 0, distance_miles: float = 0, condition_notes: str = "",
+                            source: str = "", verified: bool = False, selected: bool = True) -> int:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        address = address.strip()
+        if not address:
+            raise ValueError("Comparable address is required.")
+        numeric = [sold_price, square_feet, bedrooms, bathrooms, lot_size, distance_miles]
+        if any(float(v or 0) < 0 for v in numeric):
+            raise ValueError("Comparable values cannot be negative.")
+        if float(sold_price) <= 0:
+            raise ValueError("Sold price must be greater than zero.")
+        if sold_date:
+            try: datetime.strptime(sold_date, "%Y-%m-%d")
+            except ValueError as exc: raise ValueError("Sold date must use YYYY-MM-DD.") from exc
+        stamp = now()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO comparable_sales(property_id,address,sold_price,sold_date,square_feet,distance_miles,bedrooms,bathrooms,lot_size,condition_notes,source,verified,selected,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (property_id,address.strip(),float(sold_price),sold_date,float(square_feet or 0),float(distance_miles or 0),float(bedrooms or 0),float(bathrooms or 0),float(lot_size or 0),condition_notes.strip(),source.strip(),int(verified),int(selected),stamp))
+            comp_id=int(cur.lastrowid)
+            self.conn.execute("INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                              (property_id,"Comparable Added",f"{address} — ${float(sold_price):,.2f}","admin",stamp))
+        self.audit("add_comparable_sale","comparable_sale",comp_id,after={"property_id":property_id,"address":address,"sold_price":sold_price})
+        return comp_id
+
+    def list_comparable_sales(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM comparable_sales WHERE property_id=? ORDER BY sold_date DESC,id DESC",(property_id,)))
+
+    def set_comparable_selected(self, comp_id: int, selected: bool) -> None:
+        with self.conn:
+            cur=self.conn.execute("UPDATE comparable_sales SET selected=? WHERE id=?",(int(selected),comp_id))
+        if cur.rowcount == 0: raise ValueError("Comparable sale not found.")
+
+    def delete_comparable_sale(self, comp_id: int) -> None:
+        with self.conn:
+            cur=self.conn.execute("DELETE FROM comparable_sales WHERE id=?",(comp_id,))
+        if cur.rowcount == 0: raise ValueError("Comparable sale not found.")
+
+    def comparable_arv(self, property_id: int) -> dict[str, float]:
+        prop=self.property_details(property_id)
+        if prop is None: raise ValueError("Property not found.")
+        comps=[dict(r) for r in self.list_comparable_sales(property_id)]
+        return estimate_arv(comps,float(prop["square_feet"] or 0))
+
+    def save_offer_scenario(self, property_id: int, *, suggested_arv: float, seller_offer: float,
+                            buyer_price: float, assignment_fee: float, notes: str = "") -> int:
+        if self.property_details(property_id) is None: raise ValueError("Property not found.")
+        if any(float(v) < 0 for v in (suggested_arv,seller_offer,buyer_price,assignment_fee)):
+            raise ValueError("Offer values cannot be negative.")
+        estimated_profit=round(float(buyer_price)-float(seller_offer),2)
+        stamp=now()
+        with self.conn:
+            cur=self.conn.execute("""INSERT INTO offer_scenarios(property_id,suggested_arv,seller_offer,buyer_price,assignment_fee,estimated_profit,notes,created_at)
+                VALUES(?,?,?,?,?,?,?,?)""",(property_id,suggested_arv,seller_offer,buyer_price,assignment_fee,estimated_profit,notes.strip(),stamp))
+            offer_id=int(cur.lastrowid)
+            self.conn.execute("INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id,"Offer Scenario Saved",f"Seller: ${seller_offer:,.2f}; Buyer: ${buyer_price:,.2f}; Spread: ${estimated_profit:,.2f}","admin",stamp))
+        self.audit("save_offer_scenario","offer_scenario",offer_id,after={"property_id":property_id,"seller_offer":seller_offer,"buyer_price":buyer_price})
+        return offer_id
+
+    def list_offer_scenarios(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM offer_scenarios WHERE property_id=? ORDER BY id DESC",(property_id,)))
 
     def list_buyers(self, search: str = "", active_only: bool = False) -> list[sqlite3.Row]:
         sql = "SELECT * FROM buyers WHERE 1=1"

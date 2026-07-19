@@ -83,6 +83,7 @@ class PropertyDialog(QDialog):
         self.tabs.addTab(self.workflow_tab(), "Workflow")
         self.tabs.addTab(self.notes_tab(), "Notes")
         self.tabs.addTab(self.tasks_tab(), "Tasks")
+        self.tabs.addTab(self.comps_offer_tab(), "Comps & Offer Builder")
         self.tabs.addTab(self.deal_analyzer_tab(), "Deal Analyzer")
         self.tabs.addTab(self.buyer_matches_tab(), "Buyer Matches")
         self.tabs.addTab(self.activity_tab(), "Activity")
@@ -131,6 +132,108 @@ class PropertyDialog(QDialog):
         actions = QHBoxLayout(); add = QPushButton("Add Task"); add.clicked.connect(self.add_task); complete = QPushButton("Mark Completed"); complete.clicked.connect(self.complete_task)
         actions.addWidget(add); actions.addWidget(complete); actions.addStretch(); layout.addLayout(actions)
         return page
+
+    def comps_offer_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        self.comps_table = QTableWidget(0, 11)
+        self.comps_table.setHorizontalHeaderLabels(["ID","Use","Address","Sold Price","Sold Date","Sq Ft","$/Sq Ft","Beds","Baths","Miles","Source"])
+        self.comps_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.comps_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.comps_table, 1)
+
+        form = QFormLayout()
+        self.comp_address = QLineEdit(); self.comp_price = QDoubleSpinBox(); self.comp_price.setRange(0,100000000); self.comp_price.setPrefix("$")
+        self.comp_date = QLineEdit(); self.comp_date.setPlaceholderText("YYYY-MM-DD")
+        self.comp_sqft = QDoubleSpinBox(); self.comp_sqft.setRange(0,1000000); self.comp_sqft.setDecimals(0)
+        self.comp_beds = QDoubleSpinBox(); self.comp_beds.setRange(0,100); self.comp_beds.setDecimals(1)
+        self.comp_baths = QDoubleSpinBox(); self.comp_baths.setRange(0,100); self.comp_baths.setDecimals(1)
+        self.comp_lot = QDoubleSpinBox(); self.comp_lot.setRange(0,100000000); self.comp_lot.setDecimals(0)
+        self.comp_distance = QDoubleSpinBox(); self.comp_distance.setRange(0,1000); self.comp_distance.setDecimals(2); self.comp_distance.setSuffix(" mi")
+        self.comp_source = QLineEdit(); self.comp_notes = QLineEdit(); self.comp_verified = QCheckBox("Verified")
+        for label,widget in [("Comparable address",self.comp_address),("Sold price",self.comp_price),("Sold date",self.comp_date),("Square feet",self.comp_sqft),
+                             ("Bedrooms",self.comp_beds),("Bathrooms",self.comp_baths),("Lot size",self.comp_lot),("Distance",self.comp_distance),
+                             ("Source",self.comp_source),("Condition / notes",self.comp_notes),("Verification",self.comp_verified)]: form.addRow(label,widget)
+        layout.addLayout(form)
+        actions=QHBoxLayout(); add=QPushButton("Add Comparable"); add.clicked.connect(self.add_comparable)
+        toggle=QPushButton("Use / Exclude Selected"); toggle.clicked.connect(self.toggle_comparable)
+        delete=QPushButton("Delete Selected"); delete.clicked.connect(self.delete_comparable)
+        estimate=QPushButton("Estimate ARV"); estimate.clicked.connect(self.estimate_comps_arv)
+        for button in (add,toggle,delete,estimate): actions.addWidget(button)
+        actions.addStretch(); layout.addLayout(actions)
+
+        self.arv_summary=QLabel("Add comparable sales, then estimate ARV."); self.arv_summary.setWordWrap(True); self.arv_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.arv_summary)
+        offer_form=QFormLayout()
+        def money(default=0.0):
+            w=QDoubleSpinBox(); w.setRange(0,100000000); w.setDecimals(2); w.setPrefix("$"); w.setValue(default); return w
+        self.offer_arv=money(); self.seller_offer=money(); self.builder_buyer_price=money(); self.builder_fee=money(10000); self.builder_notes=QLineEdit()
+        for label,widget in [("Suggested ARV",self.offer_arv),("Seller offer",self.seller_offer),("Buyer disposition price",self.builder_buyer_price),
+                             ("Assignment fee target",self.builder_fee),("Offer notes",self.builder_notes)]: offer_form.addRow(label,widget)
+        layout.addLayout(offer_form)
+        save=QPushButton("Save Offer Scenario"); save.clicked.connect(self.save_offer_scenario); layout.addWidget(save)
+        self.offer_history=QTableWidget(0,8); self.offer_history.setHorizontalHeaderLabels(["ID","Created","ARV","Seller Offer","Buyer Price","Fee Target","Spread","Notes"])
+        self.offer_history.setEditTriggers(QAbstractItemView.NoEditTriggers); layout.addWidget(self.offer_history,1)
+        return page
+
+    def selected_comp_id(self):
+        row=self.comps_table.currentRow(); return int(self.comps_table.item(row,0).text()) if row >= 0 else None
+
+    def add_comparable(self):
+        try:
+            self.repo.add_comparable_sale(self.property_id,address=self.comp_address.text(),sold_price=self.comp_price.value(),sold_date=self.comp_date.text().strip(),
+                square_feet=self.comp_sqft.value(),bedrooms=self.comp_beds.value(),bathrooms=self.comp_baths.value(),lot_size=self.comp_lot.value(),
+                distance_miles=self.comp_distance.value(),condition_notes=self.comp_notes.text(),source=self.comp_source.text(),verified=self.comp_verified.isChecked())
+            self.comp_address.clear(); self.comp_price.setValue(0); self.comp_date.clear(); self.comp_source.clear(); self.comp_notes.clear(); self.refresh_comps(); self.refresh_activity()
+        except ValueError as exc: QMessageBox.warning(self,"Cannot add comparable",str(exc))
+
+    def toggle_comparable(self):
+        comp_id=self.selected_comp_id()
+        if not comp_id: QMessageBox.information(self,"Select comparable","Select a comparable sale first."); return
+        row=self.comps_table.currentRow(); selected=self.comps_table.item(row,1).text()=="Yes"
+        self.repo.set_comparable_selected(comp_id,not selected); self.refresh_comps()
+
+    def delete_comparable(self):
+        comp_id=self.selected_comp_id()
+        if not comp_id: QMessageBox.information(self,"Select comparable","Select a comparable sale first."); return
+        self.repo.delete_comparable_sale(comp_id); self.refresh_comps()
+
+    def estimate_comps_arv(self):
+        try:
+            result=self.repo.comparable_arv(self.property_id)
+            self.offer_arv.setValue(result["suggested_arv"])
+            latest=self.repo.latest_deal(self.property_id)
+            fee=float(latest.get("wholesale_fee") or self.builder_fee.value()) if latest else self.builder_fee.value()
+            target=float(latest.get("target_pct") or .70) if latest else .70
+            if target > 1: target/=100
+            repairs=float(latest.get("repairs") or 0) if latest else 0
+            seller=max(0,result["suggested_arv"]*target-repairs-fee)
+            buyer=max(0,seller+fee)
+            self.seller_offer.setValue(seller); self.builder_buyer_price.setValue(buyer); self.builder_fee.setValue(fee)
+            self.arv_summary.setText(f"Selected comps: {int(result['comp_count'])} | Average sale: ${result['average_price']:,.2f} | Average $/sq ft: ${result['average_ppsf']:,.2f}\nSuggested ARV: ${result['suggested_arv']:,.2f} | Range: ${result['low_arv']:,.2f}–${result['high_arv']:,.2f}")
+            return result
+        except ValueError as exc: QMessageBox.warning(self,"Cannot estimate ARV",str(exc)); return None
+
+    def save_offer_scenario(self):
+        try:
+            self.repo.save_offer_scenario(self.property_id,suggested_arv=self.offer_arv.value(),seller_offer=self.seller_offer.value(),
+                buyer_price=self.builder_buyer_price.value(),assignment_fee=self.builder_fee.value(),notes=self.builder_notes.text())
+            self.builder_notes.clear(); self.refresh_offer_scenarios(); self.refresh_activity(); QMessageBox.information(self,"Saved","Offer scenario saved.")
+        except ValueError as exc: QMessageBox.warning(self,"Cannot save offer",str(exc))
+
+    def refresh_comps(self):
+        rows=self.repo.list_comparable_sales(self.property_id); self.comps_table.setRowCount(len(rows))
+        for r,item in enumerate(rows):
+            ppsf=(float(item['sold_price'])/float(item['square_feet'])) if float(item['square_feet'] or 0)>0 else 0
+            vals=[item['id'],"Yes" if item['selected'] else "No",item['address'],f"${item['sold_price']:,.2f}",item['sold_date'],f"{item['square_feet']:,.0f}" if item['square_feet'] else "",f"${ppsf:,.2f}" if ppsf else "",item['bedrooms'],item['bathrooms'],item['distance_miles'],item['source']]
+            for c,val in enumerate(vals): self.comps_table.setItem(r,c,QTableWidgetItem(str(val or "")))
+        self.comps_table.resizeColumnsToContents()
+
+    def refresh_offer_scenarios(self):
+        rows=self.repo.list_offer_scenarios(self.property_id); self.offer_history.setRowCount(len(rows))
+        for r,item in enumerate(rows):
+            vals=[item['id'],item['created_at'],f"${item['suggested_arv']:,.2f}",f"${item['seller_offer']:,.2f}",f"${item['buyer_price']:,.2f}",f"${item['assignment_fee']:,.2f}",f"${item['estimated_profit']:,.2f}",item['notes']]
+            for c,val in enumerate(vals): self.offer_history.setItem(r,c,QTableWidgetItem(str(val or "")))
+        self.offer_history.resizeColumnsToContents()
 
     def deal_analyzer_tab(self):
         page = QWidget(); layout = QVBoxLayout(page); form = QFormLayout()
@@ -247,7 +350,7 @@ class PropertyDialog(QDialog):
             widget.setText(str(d[key] or ''))
         self.status.setCurrentText(d['status'] or 'New'); self.priority.setCurrentText(d['priority'] or 'Normal'); self.follow_up.setText(d['follow_up_date'] or '')
         self.internal_dnc.setChecked(bool(d['internal_dnc'])); self.opt_out.setChecked(bool(d['opt_out']))
-        self.refresh_notes(); self.refresh_tasks(); self.refresh_deals(); self.refresh_buyer_matches(); self.refresh_offers(); self.refresh_activity()
+        self.refresh_notes(); self.refresh_tasks(); self.refresh_comps(); self.refresh_offer_scenarios(); self.refresh_deals(); self.refresh_buyer_matches(); self.refresh_offers(); self.refresh_activity()
 
     def save_profile(self):
         try:
@@ -483,7 +586,7 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self.repo = repo
-        self.setWindowTitle("LeadDesk AI 3.4 — Buyer CRM & Offer Pipeline")
+        self.setWindowTitle("LeadDesk AI 3.5 — Comps & Offer Builder")
         self.resize(1320, 800)
         root = QWidget()
         self.setCentralWidget(root)
@@ -542,7 +645,7 @@ class MainWindow(QMainWindow):
     def about_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("LeadDesk AI 3.4 Buyer CRM & Offer Pipeline")
+        title = QLabel("LeadDesk AI 3.5 Comps & Offer Builder")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         label = QLabel(
