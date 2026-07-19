@@ -84,6 +84,7 @@ class PropertyDialog(QDialog):
         self.tabs.addTab(self.notes_tab(), "Notes")
         self.tabs.addTab(self.tasks_tab(), "Tasks")
         self.tabs.addTab(self.deal_analyzer_tab(), "Deal Analyzer")
+        self.tabs.addTab(self.buyer_matches_tab(), "Buyer Matches")
         self.tabs.addTab(self.activity_tab(), "Activity")
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -175,6 +176,65 @@ class PropertyDialog(QDialog):
             for c,val in enumerate(vals): self.deal_history.setItem(r,c,QTableWidgetItem(str(val)))
         self.deal_history.resizeColumnsToContents()
 
+    def buyer_matches_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        self.matches_table = QTableWidget(0, 7)
+        self.matches_table.setHorizontalHeaderLabels(["Buyer ID", "Score", "Buyer", "Company", "Phone", "Target Price", "Why"] )
+        self.matches_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.matches_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        layout.addWidget(self.matches_table, 1)
+        refresh = QPushButton("Find Matching Buyers")
+        refresh.clicked.connect(self.refresh_buyer_matches)
+        layout.addWidget(refresh)
+        form = QFormLayout()
+        self.offer_amount = QDoubleSpinBox(); self.offer_amount.setRange(0, 100000000); self.offer_amount.setDecimals(2); self.offer_amount.setPrefix("$")
+        self.offer_status = QComboBox(); self.offer_status.addItems(self.repo.BUYER_OFFER_STATUSES)
+        self.offer_pof = QCheckBox("Proof of funds received")
+        self.offer_sent = QLineEdit(); self.offer_sent.setPlaceholderText("YYYY-MM-DD")
+        self.offer_responded = QLineEdit(); self.offer_responded.setPlaceholderText("YYYY-MM-DD")
+        self.offer_notes = QLineEdit()
+        form.addRow("Offer / buyer price", self.offer_amount); form.addRow("Pipeline status", self.offer_status)
+        form.addRow("Proof of funds", self.offer_pof); form.addRow("Sent date", self.offer_sent)
+        form.addRow("Responded date", self.offer_responded); form.addRow("Notes", self.offer_notes)
+        layout.addLayout(form)
+        add = QPushButton("Add Selected Buyer to Offer Pipeline"); add.clicked.connect(self.add_buyer_offer); layout.addWidget(add)
+        self.offers_table = QTableWidget(0, 8)
+        self.offers_table.setHorizontalHeaderLabels(["ID", "Buyer", "Amount", "Status", "POF", "Sent", "Responded", "Notes"])
+        self.offers_table.setEditTriggers(QAbstractItemView.NoEditTriggers); layout.addWidget(self.offers_table, 1)
+        return page
+
+    def selected_match_buyer_id(self):
+        row = self.matches_table.currentRow()
+        return int(self.matches_table.item(row, 0).text()) if row >= 0 else None
+
+    def refresh_buyer_matches(self):
+        rows = self.repo.match_buyers(self.property_id)
+        self.matches_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            values = [item["id"], f"{item['match_score']}% {item['match_label']}", item["name"], item["company"], item["phone"], f"${item['target_price']:,.2f}", item["match_reasons"]]
+            for c, value in enumerate(values): self.matches_table.setItem(r, c, QTableWidgetItem(str(value or "")))
+        self.matches_table.resizeColumnsToContents()
+        latest = self.repo.latest_deal(self.property_id)
+        if latest: self.offer_amount.setValue(float(latest.get("buyer_price") or latest.get("mao") or 0))
+
+    def add_buyer_offer(self):
+        buyer_id = self.selected_match_buyer_id()
+        if not buyer_id:
+            QMessageBox.information(self, "Select buyer", "Select a matching buyer first."); return
+        try:
+            self.repo.add_buyer_offer(self.property_id, buyer_id, self.offer_amount.value(), self.offer_status.currentText(),
+                                      self.offer_pof.isChecked(), self.offer_notes.text(), self.offer_sent.text().strip(),
+                                      self.offer_responded.text().strip())
+            self.offer_notes.clear(); self.refresh_offers(); self.refresh_activity()
+        except ValueError as exc: QMessageBox.warning(self, "Cannot add offer", str(exc))
+
+    def refresh_offers(self):
+        rows = self.repo.list_buyer_offers(self.property_id); self.offers_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            values = [item["id"], item["buyer_name"], f"${item['amount']:,.2f}", item["status"], "Yes" if item["proof_of_funds"] else "No", item["sent_date"], item["responded_date"], item["notes"]]
+            for c, value in enumerate(values): self.offers_table.setItem(r, c, QTableWidgetItem(str(value or "")))
+        self.offers_table.resizeColumnsToContents()
+
     def activity_tab(self):
         page = QWidget(); layout = QVBoxLayout(page); self.activity_history = QTextEdit(); self.activity_history.setReadOnly(True); layout.addWidget(self.activity_history); return page
 
@@ -187,7 +247,7 @@ class PropertyDialog(QDialog):
             widget.setText(str(d[key] or ''))
         self.status.setCurrentText(d['status'] or 'New'); self.priority.setCurrentText(d['priority'] or 'Normal'); self.follow_up.setText(d['follow_up_date'] or '')
         self.internal_dnc.setChecked(bool(d['internal_dnc'])); self.opt_out.setChecked(bool(d['opt_out']))
-        self.refresh_notes(); self.refresh_tasks(); self.refresh_deals(); self.refresh_activity()
+        self.refresh_notes(); self.refresh_tasks(); self.refresh_deals(); self.refresh_buyer_matches(); self.refresh_offers(); self.refresh_activity()
 
     def save_profile(self):
         try:
@@ -337,23 +397,107 @@ class PropertiesPage(QWidget):
             QMessageBox.critical(self, "Import failed", str(exc))
 
 
+class BuyerEditorDialog(QDialog):
+    def __init__(self, repo: Repository, buyer_id: int | None = None, parent=None):
+        super().__init__(parent); self.repo = repo; self.buyer_id = buyer_id
+        self.setWindowTitle("Edit Buyer" if buyer_id else "Add Buyer"); self.resize(620, 650)
+        layout = QVBoxLayout(self); form = QFormLayout()
+        self.name = QLineEdit(); self.company = QLineEdit(); self.email = QLineEdit(); self.phone = QLineEdit()
+        self.markets = QLineEdit(); self.counties = QLineEdit(); self.zip_codes = QLineEdit(); self.property_types = QLineEdit()
+        self.min_price = QDoubleSpinBox(); self.min_price.setRange(0, 100000000); self.min_price.setPrefix("$")
+        self.max_price = QDoubleSpinBox(); self.max_price.setRange(0, 100000000); self.max_price.setPrefix("$")
+        self.rehab_level = QComboBox(); self.rehab_level.addItems(["", "Light", "Moderate", "Heavy", "Any"])
+        self.funding_type = QComboBox(); self.funding_type.addItems(["", "Cash", "Hard Money", "Private Money", "Conventional", "Other"])
+        self.close_days = QLineEdit(); self.close_days.setPlaceholderText("Example: 14")
+        self.active = QCheckBox("Active buyer"); self.active.setChecked(True); self.notes = QTextEdit(); self.notes.setMaximumHeight(100)
+        fields = [("Buyer name", self.name), ("Company", self.company), ("Email", self.email), ("Phone", self.phone),
+                  ("Markets / states", self.markets), ("Counties", self.counties), ("ZIP codes", self.zip_codes),
+                  ("Property types", self.property_types), ("Minimum price", self.min_price), ("Maximum price", self.max_price),
+                  ("Rehab level", self.rehab_level), ("Funding type", self.funding_type), ("Average close days", self.close_days),
+                  ("Status", self.active), ("Notes", self.notes)]
+        for label, widget in fields: form.addRow(label, widget)
+        layout.addLayout(form); buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.save); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
+        if buyer_id: self.load_buyer()
+
+    def load_buyer(self):
+        b = self.repo.buyer(self.buyer_id)
+        for widget, key in [(self.name,"name"),(self.company,"company"),(self.email,"email"),(self.phone,"phone"),(self.markets,"markets"),
+                            (self.counties,"counties"),(self.zip_codes,"zip_codes"),(self.property_types,"property_types"),(self.close_days,"avg_close_days")]:
+            widget.setText(str(b.get(key) or ""))
+        self.min_price.setValue(float(b.get("min_price") or 0)); self.max_price.setValue(float(b.get("max_price") or 0))
+        self.rehab_level.setCurrentText(str(b.get("rehab_level") or "")); self.funding_type.setCurrentText(str(b.get("funding_type") or ""))
+        self.active.setChecked(bool(b.get("active"))); self.notes.setPlainText(str(b.get("notes") or ""))
+
+    def save(self):
+        values = {"name": self.name.text(), "company": self.company.text(), "email": self.email.text(), "phone": self.phone.text(),
+                  "markets": self.markets.text(), "counties": self.counties.text(), "zip_codes": self.zip_codes.text(),
+                  "property_types": self.property_types.text(), "min_price": self.min_price.value() or None,
+                  "max_price": self.max_price.value() or None, "rehab_level": self.rehab_level.currentText(),
+                  "funding_type": self.funding_type.currentText(), "avg_close_days": self.close_days.text().strip() or None,
+                  "active": self.active.isChecked(), "notes": self.notes.toPlainText()}
+        try:
+            self.repo.save_buyer(values, self.buyer_id); self.accept()
+        except (ValueError, TypeError) as exc: QMessageBox.warning(self, "Cannot save buyer", str(exc))
+
+
+class BuyersPage(QWidget):
+    def __init__(self, repo: Repository, dashboard: DashboardPage):
+        super().__init__(); self.repo = repo; self.dashboard = dashboard
+        layout = QVBoxLayout(self); title = QLabel("Buyer CRM"); title.setObjectName("pageTitle"); layout.addWidget(title)
+        bar = QHBoxLayout(); self.search = QLineEdit(); self.search.setPlaceholderText("Search name, company, phone, market, county, ZIP, property type, or funding")
+        self.search.returnPressed.connect(self.refresh); add = QPushButton("Add Buyer"); add.clicked.connect(self.add_buyer)
+        edit = QPushButton("Edit Selected"); edit.clicked.connect(self.edit_buyer); delete = QPushButton("Delete Selected"); delete.clicked.connect(self.delete_buyer)
+        bar.addWidget(self.search, 1); bar.addWidget(add); bar.addWidget(edit); bar.addWidget(delete); layout.addLayout(bar)
+        self.table = QTableWidget(0, 12); self.table.setHorizontalHeaderLabels(["ID","Active","Buyer","Company","Phone","Email","Markets","Counties","ZIPs","Property Types","Price Range","Funding / Close"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.doubleClicked.connect(self.edit_buyer)
+        layout.addWidget(self.table, 1); self.refresh()
+
+    def selected_id(self):
+        row = self.table.currentRow(); return int(self.table.item(row,0).text()) if row >= 0 else None
+
+    def refresh(self):
+        rows = self.repo.list_buyers(self.search.text()); self.table.setRowCount(len(rows))
+        for r, b in enumerate(rows):
+            low = f"${b['min_price']:,.0f}" if b['min_price'] is not None else "Any"; high = f"${b['max_price']:,.0f}" if b['max_price'] is not None else "Any"
+            funding = str(b['funding_type'] or ""); close = f"{b['avg_close_days']} days" if b['avg_close_days'] is not None else ""
+            values = [b['id'], "Yes" if b['active'] else "No", b['name'], b['company'], b['phone'], b['email'], b['markets'], b['counties'], b['zip_codes'], b['property_types'], f"{low} – {high}", " / ".join(x for x in (funding, close) if x)]
+            for c, value in enumerate(values): self.table.setItem(r,c,QTableWidgetItem(str(value or "")))
+        self.table.resizeColumnsToContents()
+
+    def add_buyer(self):
+        if BuyerEditorDialog(self.repo, parent=self).exec(): self.refresh(); self.dashboard.refresh()
+
+    def edit_buyer(self):
+        buyer_id = self.selected_id()
+        if buyer_id and BuyerEditorDialog(self.repo, buyer_id, self).exec(): self.refresh(); self.dashboard.refresh()
+
+    def delete_buyer(self):
+        buyer_id = self.selected_id()
+        if not buyer_id: return
+        if QMessageBox.question(self, "Delete buyer", "Delete this buyer? Existing pipeline history will keep a deleted-buyer label.") == QMessageBox.Yes:
+            self.repo.delete_buyer(buyer_id); self.refresh(); self.dashboard.refresh()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self.repo = repo
-        self.setWindowTitle("LeadDesk AI 3.3 — Deal Analyzer")
+        self.setWindowTitle("LeadDesk AI 3.4 — Buyer CRM & Offer Pipeline")
         self.resize(1320, 800)
         root = QWidget()
         self.setCentralWidget(root)
         layout = QHBoxLayout(root)
         self.nav = QListWidget()
-        self.nav.addItems(["Dashboard", "Lead Manager", "Migration & Backup", "About"])
+        self.nav.addItems(["Dashboard", "Lead Manager", "Buyer CRM", "Migration & Backup", "About"])
         self.nav.setFixedWidth(210)
         self.pages = QStackedWidget()
         self.dashboard = DashboardPage(repo)
         self.properties = PropertiesPage(repo, self.dashboard)
+        self.buyers = BuyersPage(repo, self.dashboard)
         self.pages.addWidget(self.dashboard)
         self.pages.addWidget(self.properties)
+        self.pages.addWidget(self.buyers)
         self.pages.addWidget(self.tools_page())
         self.pages.addWidget(self.about_page())
         self.nav.currentRowChanged.connect(self.change_page)
@@ -374,6 +518,8 @@ class MainWindow(QMainWindow):
             self.dashboard.refresh()
         if index == 1:
             self.properties.refresh()
+        if index == 2:
+            self.buyers.refresh()
 
     def tools_page(self):
         page = QWidget()
@@ -396,11 +542,11 @@ class MainWindow(QMainWindow):
     def about_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("LeadDesk AI 3.3 Deal Analyzer")
+        title = QLabel("LeadDesk AI 3.4 Buyer CRM & Offer Pipeline")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         label = QLabel(
-            "Lead CRM • Property Workspace • Deal Analyzer • saved deal history • tasks • activity timeline • notes • workflow controls • tested backups\n\n"
+            "Lead CRM • Property Workspace • Deal Analyzer • Buyer CRM • buy-box matching • offer pipeline • tasks • activity timeline • tested backups\n\n"
             "This application supports organization and analysis. It does not provide legal advice or automatically authorize calls, texts, emails, contracts, or negotiations."
         )
         label.setWordWrap(True)

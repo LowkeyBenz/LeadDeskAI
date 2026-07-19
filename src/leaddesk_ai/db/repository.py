@@ -33,6 +33,7 @@ class Repository:
         self.conn.executescript(SCHEMA_SQL)
         self._ensure_property_columns()
         self._ensure_deal_columns()
+        self._ensure_buyer_offer_columns()
         row = self.conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
         if row is None:
             self.conn.execute("INSERT INTO schema_meta(version) VALUES(?)", (SCHEMA_VERSION,))
@@ -73,6 +74,16 @@ class Repository:
         for column, definition in additions.items():
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE deals ADD COLUMN {column} {definition}")
+
+    def _ensure_buyer_offer_columns(self) -> None:
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(buyer_offers)")}
+        additions = {
+            "sent_date": "TEXT DEFAULT ''",
+            "responded_date": "TEXT DEFAULT ''",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                self.conn.execute(f"ALTER TABLE buyer_offers ADD COLUMN {column} {definition}")
 
     def close(self) -> None:
         self.conn.close()
@@ -426,4 +437,176 @@ class Repository:
 
     def list_deal_analyses(self, property_id: int) -> list[sqlite3.Row]:
         return list(self.conn.execute("SELECT * FROM deals WHERE property_id=? ORDER BY id DESC", (property_id,)))
+    # --- Buyer CRM and offer pipeline ---
+    BUYER_OFFER_STATUSES = ("New", "Sent", "Opened", "Interested", "Negotiating", "Under Contract", "Closed", "Passed")
+
+    def list_buyers(self, search: str = "", active_only: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM buyers WHERE 1=1"
+        args: list[Any] = []
+        if active_only:
+            sql += " AND active=1"
+        if search.strip():
+            term = f"%{search.strip()}%"
+            sql += " AND (name LIKE ? OR company LIKE ? OR email LIKE ? OR phone LIKE ? OR markets LIKE ? OR counties LIKE ? OR zip_codes LIKE ? OR property_types LIKE ? OR funding_type LIKE ?)"
+            args.extend([term] * 9)
+        return list(self.conn.execute(sql + " ORDER BY active DESC, name COLLATE NOCASE", args))
+
+    def buyer(self, buyer_id: int) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM buyers WHERE id=?", (buyer_id,)).fetchone()
+        if row is None:
+            raise ValueError("Buyer not found.")
+        return dict(row)
+
+    def save_buyer(self, values: dict[str, Any], buyer_id: int | None = None) -> int:
+        name = str(values.get("name", "")).strip()
+        if not name:
+            raise ValueError("Buyer name is required.")
+
+        def optional_float(key: str) -> float | None:
+            value = values.get(key)
+            if value in (None, ""):
+                return None
+            parsed = float(value)
+            if parsed < 0:
+                raise ValueError(f"{key.replace('_', ' ').title()} cannot be negative.")
+            return parsed
+
+        close_days = values.get("avg_close_days")
+        close_days = None if close_days in (None, "") else int(close_days)
+        if close_days is not None and close_days < 0:
+            raise ValueError("Average close days cannot be negative.")
+        data = (
+            name, str(values.get("company", "")).strip(), str(values.get("email", "")).strip(),
+            str(values.get("phone", "")).strip(), str(values.get("markets", "")).strip(),
+            str(values.get("property_types", "")).strip(), optional_float("min_price"), optional_float("max_price"),
+            str(values.get("rehab_level", "")).strip(), str(values.get("funding_type", "")).strip(),
+            str(values.get("zip_codes", "")).strip(), str(values.get("counties", "")).strip(), close_days,
+            int(bool(values.get("active", True))), str(values.get("notes", "")).strip(),
+        )
+        if data[6] is not None and data[7] is not None and data[6] > data[7]:
+            raise ValueError("Minimum price cannot be greater than maximum price.")
+        if buyer_id is not None:
+            before = self.buyer(buyer_id)
+            with self.conn:
+                self.conn.execute(
+                    """UPDATE buyers SET name=?,company=?,email=?,phone=?,markets=?,property_types=?,min_price=?,max_price=?,
+                    rehab_level=?,funding_type=?,zip_codes=?,counties=?,avg_close_days=?,active=?,notes=? WHERE id=?""",
+                    data + (buyer_id,),
+                )
+            self.audit("update_buyer", "buyer", buyer_id, before=before, after=values)
+            return buyer_id
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO buyers(name,company,email,phone,markets,property_types,min_price,max_price,rehab_level,
+                funding_type,zip_codes,counties,avg_close_days,active,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                data + (now(),),
+            )
+        new_id = int(cur.lastrowid)
+        self.audit("create_buyer", "buyer", new_id, after=values)
+        return new_id
+
+    def delete_buyer(self, buyer_id: int) -> None:
+        before = self.buyer(buyer_id)
+        with self.conn:
+            self.conn.execute("DELETE FROM buyers WHERE id=?", (buyer_id,))
+        self.audit("delete_buyer", "buyer", buyer_id, before=before)
+
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        return {item.strip().lower() for item in str(text or "").replace(";", ",").split(",") if item.strip()}
+
+    def latest_deal(self, property_id: int) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM deals WHERE property_id=? ORDER BY id DESC LIMIT 1", (property_id,)).fetchone()
+        return dict(row) if row else {}
+
+    def match_buyers(self, property_id: int) -> list[dict[str, Any]]:
+        details = self.property_details(property_id)
+        if details is None:
+            raise ValueError("Property not found.")
+        prop = dict(details)
+        deal = self.latest_deal(property_id)
+        price = float(deal.get("buyer_price") or deal.get("mao") or 0)
+        results: list[dict[str, Any]] = []
+        for row in self.list_buyers(active_only=True):
+            buyer = dict(row)
+            score = 0
+            reasons: list[str] = []
+            state = str(prop.get("state") or "").strip().lower()
+            county = str(prop.get("county") or "").strip().lower()
+            zipcode = str(prop.get("zip") or "").strip().lower()
+            property_type = str(prop.get("property_type") or "").strip().lower()
+            markets = self._tokens(buyer.get("markets", ""))
+            counties = self._tokens(buyer.get("counties", ""))
+            zip_codes = self._tokens(buyer.get("zip_codes", ""))
+            property_types = self._tokens(buyer.get("property_types", ""))
+            if zipcode and zipcode in zip_codes:
+                score += 35; reasons.append("ZIP match")
+            elif county and any(county in item or item in county for item in counties):
+                score += 25; reasons.append("county match")
+            elif state and any(state == item or state in item for item in markets):
+                score += 15; reasons.append("market/state match")
+            if property_type and any(property_type == item or property_type in item or item in property_type for item in property_types):
+                score += 20; reasons.append("property type match")
+            elif not property_types:
+                score += 5; reasons.append("property type unrestricted")
+            min_price, max_price = buyer.get("min_price"), buyer.get("max_price")
+            if price:
+                if (min_price is None or price >= float(min_price)) and (max_price is None or price <= float(max_price)):
+                    score += 25; reasons.append("price in buy box")
+                else:
+                    reasons.append("price outside buy box")
+            else:
+                reasons.append("deal price not entered")
+            if buyer.get("funding_type"):
+                score += 5
+            if buyer.get("avg_close_days") and int(buyer["avg_close_days"]) <= 21:
+                score += 5; reasons.append("fast closer")
+            buyer.update(
+                match_score=min(score, 100),
+                match_label="Strong" if score >= 65 else "Possible" if score >= 35 else "Weak",
+                match_reasons=", ".join(reasons),
+                target_price=price,
+            )
+            results.append(buyer)
+        return sorted(results, key=lambda item: (-item["match_score"], item["name"].lower()))
+
+    def add_buyer_offer(self, property_id: int, buyer_id: int, amount: float, status: str = "New",
+                        proof_of_funds: bool = False, notes: str = "", sent_date: str = "", responded_date: str = "") -> int:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        self.buyer(buyer_id)
+        amount = float(amount)
+        if amount < 0:
+            raise ValueError("Offer amount cannot be negative.")
+        if status not in self.BUYER_OFFER_STATUSES:
+            raise ValueError("Invalid offer status.")
+        for label, date_value in (("Sent date", sent_date), ("Responded date", responded_date)):
+            if date_value:
+                try:
+                    datetime.strptime(date_value, "%Y-%m-%d")
+                except ValueError as exc:
+                    raise ValueError(f"{label} must use YYYY-MM-DD.") from exc
+        stamp = now()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO buyer_offers(property_id,buyer_id,amount,proof_of_funds,status,notes,sent_date,responded_date,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (property_id, buyer_id, amount, int(proof_of_funds), status, notes.strip(), sent_date, responded_date, stamp),
+            )
+            buyer_name = self.conn.execute("SELECT name FROM buyers WHERE id=?", (buyer_id,)).fetchone()["name"]
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, "Buyer Pipeline", f"{buyer_name} — ${amount:,.2f} ({status})", "admin", stamp),
+            )
+        offer_id = int(cur.lastrowid)
+        self.audit("add_buyer_offer", "buyer_offer", offer_id, after={"property_id": property_id, "buyer_id": buyer_id, "amount": amount, "status": status})
+        return offer_id
+
+    def list_buyer_offers(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            """SELECT bo.*, COALESCE(b.name,'Deleted buyer') buyer_name, COALESCE(b.company,'') company
+            FROM buyer_offers bo LEFT JOIN buyers b ON b.id=bo.buyer_id
+            WHERE bo.property_id=? ORDER BY bo.id DESC""",
+            (property_id,),
+        ))
 

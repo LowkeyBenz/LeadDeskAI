@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys=ON;
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS buyers(
 CREATE TABLE IF NOT EXISTS buyer_offers(
  id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
  buyer_id INTEGER REFERENCES buyers(id) ON DELETE SET NULL, amount REAL NOT NULL DEFAULT 0,
- proof_of_funds INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'Received', notes TEXT DEFAULT '',
+ proof_of_funds INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'New', notes TEXT DEFAULT '', sent_date TEXT DEFAULT '', responded_date TEXT DEFAULT '',
  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS campaigns(
