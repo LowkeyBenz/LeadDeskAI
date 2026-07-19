@@ -790,6 +790,67 @@ class Repository:
         sql += " ORDER BY p.follow_up_date ASC, CASE p.priority WHEN 'Urgent' THEN 1 WHEN 'High' THEN 2 WHEN 'Normal' THEN 3 ELSE 4 END"
         return list(self.conn.execute(sql, args))
 
+    DOCUMENT_TYPES = ("Purchase Agreement", "Assignment Contract", "Offer Sheet", "Property Summary", "Seller Information", "Inspection", "Title", "Photo", "Other")
+    DOCUMENT_STATUSES = ("Draft", "Ready", "Sent", "Signed", "Archived")
+
+    def add_document(self, property_id: int, *, name: str, document_type: str = "Other", status: str = "Draft",
+                     file_path: str = "", notes: str = "") -> int:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        name = name.strip()
+        if not name:
+            raise ValueError("Document name is required.")
+        if document_type not in self.DOCUMENT_TYPES:
+            raise ValueError("Invalid document type.")
+        if status not in self.DOCUMENT_STATUSES:
+            raise ValueError("Invalid document status.")
+        stamp = now()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO documents(property_id,name,document_type,status,file_path,notes,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                (property_id, name, document_type, status, file_path.strip(), notes.strip(), stamp, stamp),
+            )
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, "Document Added", f"{document_type}: {name} ({status})", "admin", stamp),
+            )
+        document_id = int(cur.lastrowid)
+        self.audit("add_document", "document", document_id, after={"property_id": property_id, "name": name, "status": status})
+        return document_id
+
+    def list_documents(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute(
+            "SELECT * FROM documents WHERE property_id=? ORDER BY id DESC", (property_id,)
+        ))
+
+    def update_document_status(self, document_id: int, status: str) -> None:
+        if status not in self.DOCUMENT_STATUSES:
+            raise ValueError("Invalid document status.")
+        row = self.conn.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+        if row is None:
+            raise ValueError("Document not found.")
+        stamp = now()
+        with self.conn:
+            self.conn.execute("UPDATE documents SET status=?,updated_at=? WHERE id=?", (status, stamp, document_id))
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (row["property_id"], "Document Status", f"{row['name']} → {status}", "admin", stamp),
+            )
+        self.audit("update_document_status", "document", document_id, after={"status": status})
+
+    def delete_document(self, document_id: int) -> None:
+        row = self.conn.execute("SELECT * FROM documents WHERE id=?", (document_id,)).fetchone()
+        if row is None:
+            raise ValueError("Document not found.")
+        with self.conn:
+            self.conn.execute("DELETE FROM documents WHERE id=?", (document_id,))
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (row["property_id"], "Document Deleted", row["name"], "admin", now()),
+            )
+        self.audit("delete_document", "document", document_id, before=dict(row))
+
     def list_buyer_offers(self, property_id: int) -> list[sqlite3.Row]:
         return list(self.conn.execute(
             """SELECT bo.*, COALESCE(b.name,'Deleted buyer') buyer_name, COALESCE(b.company,'') company

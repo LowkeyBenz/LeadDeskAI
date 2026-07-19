@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys=ON;
@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS campaigns(
  id INTEGER PRIMARY KEY, name TEXT NOT NULL, channel TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
  total_records INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS documents(
+ id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+ name TEXT NOT NULL, document_type TEXT NOT NULL DEFAULT 'Other', status TEXT NOT NULL DEFAULT 'Draft',
+ file_path TEXT DEFAULT '', notes TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit_log(
  id INTEGER PRIMARY KEY, user_name TEXT DEFAULT '', action TEXT NOT NULL, entity_type TEXT DEFAULT '',
  entity_id INTEGER, before_json TEXT DEFAULT '', after_json TEXT DEFAULT '', created_at TEXT NOT NULL
@@ -116,4 +122,5 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status,due_date);
 CREATE INDEX IF NOT EXISTS idx_comps_property ON comparable_sales(property_id);
 CREATE INDEX IF NOT EXISTS idx_offers_property ON offer_scenarios(property_id,id);
 CREATE INDEX IF NOT EXISTS idx_communications_followup ON communications(next_follow_up_date,property_id);
+CREATE INDEX IF NOT EXISTS idx_documents_property ON documents(property_id,id);
 """

@@ -87,6 +87,7 @@ class PropertyDialog(QDialog):
         self.tabs.addTab(self.comps_offer_tab(), "Comps & Offer Builder")
         self.tabs.addTab(self.deal_analyzer_tab(), "Deal Analyzer")
         self.tabs.addTab(self.buyer_matches_tab(), "Buyer Matches")
+        self.tabs.addTab(self.documents_tab(), "Documents")
         self.tabs.addTab(self.activity_tab(), "Activity")
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.reject)
@@ -362,6 +363,73 @@ class PropertyDialog(QDialog):
             values = [item["id"], item["buyer_name"], f"${item['amount']:,.2f}", item["status"], "Yes" if item["proof_of_funds"] else "No", item["sent_date"], item["responded_date"], item["notes"]]
             for c, value in enumerate(values): self.offers_table.setItem(r, c, QTableWidgetItem(str(value or "")))
         self.offers_table.resizeColumnsToContents()
+
+    def documents_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page); form = QFormLayout()
+        self.document_name = QLineEdit(); self.document_type = QComboBox(); self.document_type.addItems(self.repo.DOCUMENT_TYPES)
+        self.document_status = QComboBox(); self.document_status.addItems(self.repo.DOCUMENT_STATUSES)
+        self.document_path = QLineEdit(); browse = QPushButton("Browse File"); browse.clicked.connect(self.browse_document)
+        path_row = QHBoxLayout(); path_row.addWidget(self.document_path, 1); path_row.addWidget(browse)
+        self.document_notes = QLineEdit()
+        form.addRow("Name", self.document_name); form.addRow("Type", self.document_type); form.addRow("Status", self.document_status)
+        form.addRow("File", path_row); form.addRow("Notes", self.document_notes); layout.addLayout(form)
+        add = QPushButton("Add Document Record"); add.clicked.connect(self.add_document); layout.addWidget(add)
+        self.documents_table = QTableWidget(0, 7); self.documents_table.setHorizontalHeaderLabels(["ID","Created","Name","Type","Status","File","Notes"])
+        self.documents_table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(self.documents_table, 1)
+        controls = QHBoxLayout(); self.document_new_status = QComboBox(); self.document_new_status.addItems(self.repo.DOCUMENT_STATUSES)
+        update = QPushButton("Update Selected Status"); update.clicked.connect(self.update_document_status)
+        delete = QPushButton("Delete Selected Record"); delete.clicked.connect(self.delete_document)
+        controls.addWidget(self.document_new_status); controls.addWidget(update); controls.addWidget(delete); controls.addStretch(); layout.addLayout(controls)
+        return page
+
+    def browse_document(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select document or attachment", "", "All Files (*)")
+        if path:
+            self.document_path.setText(path)
+            if not self.document_name.text().strip():
+                self.document_name.setText(Path(path).name)
+
+    def selected_document_id(self):
+        row = self.documents_table.currentRow()
+        if row < 0:
+            return None
+        item = self.documents_table.item(row, 0)
+        return int(item.text()) if item else None
+
+    def add_document(self):
+        try:
+            self.repo.add_document(self.property_id, name=self.document_name.text(), document_type=self.document_type.currentText(),
+                                   status=self.document_status.currentText(), file_path=self.document_path.text(), notes=self.document_notes.text())
+            self.document_name.clear(); self.document_path.clear(); self.document_notes.clear(); self.refresh_documents(); self.refresh_activity()
+        except Exception as exc:
+            QMessageBox.warning(self, "Document not saved", str(exc))
+
+    def update_document_status(self):
+        document_id = self.selected_document_id()
+        if not document_id:
+            QMessageBox.information(self, "Select document", "Select a document record first."); return
+        try:
+            self.repo.update_document_status(document_id, self.document_new_status.currentText()); self.refresh_documents(); self.refresh_activity()
+        except Exception as exc:
+            QMessageBox.warning(self, "Status not updated", str(exc))
+
+    def delete_document(self):
+        document_id = self.selected_document_id()
+        if not document_id:
+            QMessageBox.information(self, "Select document", "Select a document record first."); return
+        if QMessageBox.question(self, "Delete document record", "Delete the selected record? The original file will not be deleted.") != QMessageBox.Yes:
+            return
+        try:
+            self.repo.delete_document(document_id); self.refresh_documents(); self.refresh_activity()
+        except Exception as exc:
+            QMessageBox.warning(self, "Document not deleted", str(exc))
+
+    def refresh_documents(self):
+        rows = self.repo.list_documents(self.property_id); self.documents_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values = [row["id"], row["created_at"], row["name"], row["document_type"], row["status"], row["file_path"], row["notes"]]
+            for c, value in enumerate(values): self.documents_table.setItem(r, c, QTableWidgetItem(str(value or "")))
+        self.documents_table.resizeColumnsToContents()
 
     def activity_tab(self):
         page = QWidget(); layout = QVBoxLayout(page); self.activity_history = QTextEdit(); self.activity_history.setReadOnly(True); layout.addWidget(self.activity_history); return page
@@ -668,7 +736,7 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self.repo = repo
-        self.setWindowTitle("LeadDesk AI 3.6 — Seller CRM & Marketing Hub")
+        self.setWindowTitle("LeadDesk AI 3.7 — Document Center")
         self.resize(1320, 800)
         root = QWidget()
         self.setCentralWidget(root)
@@ -731,11 +799,11 @@ class MainWindow(QMainWindow):
     def about_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("LeadDesk AI 3.6 Seller CRM & Marketing Hub")
+        title = QLabel("LeadDesk AI 3.7 Document Center")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         label = QLabel(
-            "Lead CRM • Seller CRM • Marketing Hub • Follow-Up Queue • Communication History • Deal Analyzer • Buyer CRM • Comps • tested backups\n\n"
+            "Lead CRM • Seller CRM • Marketing Hub • Document Center • Deal Analyzer • Buyer CRM • Comps • tested backups\n\n"
             "This application supports organization and analysis. It does not provide legal advice or automatically authorize calls, texts, emails, contracts, or negotiations."
         )
         label.setWordWrap(True)
