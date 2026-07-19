@@ -1,4 +1,4 @@
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA_SQL = """
 PRAGMA foreign_keys=ON;
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS properties(
  id INTEGER PRIMARY KEY, lead_code TEXT UNIQUE, market TEXT DEFAULT '', county TEXT DEFAULT '',
  address TEXT DEFAULT '', city TEXT DEFAULT '', state TEXT DEFAULT '', zip TEXT DEFAULT '', apn TEXT DEFAULT '',
  property_type TEXT DEFAULT '', bedrooms REAL, bathrooms REAL, square_feet REAL,
- source_file TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'New', priority TEXT NOT NULL DEFAULT 'Normal',
+ source_file TEXT DEFAULT '', marketing_source TEXT DEFAULT '', status TEXT NOT NULL DEFAULT 'New', priority TEXT NOT NULL DEFAULT 'Normal',
  follow_up_date TEXT DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS owners(
@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS offer_scenarios(
  buyer_price REAL NOT NULL DEFAULT 0, assignment_fee REAL NOT NULL DEFAULT 0,
  estimated_profit REAL NOT NULL DEFAULT 0, notes TEXT DEFAULT '', created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS seller_profiles(
+ id INTEGER PRIMARY KEY, property_id INTEGER UNIQUE NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+ motivation_level INTEGER NOT NULL DEFAULT 0, occupancy TEXT DEFAULT '', timeline TEXT DEFAULT '',
+ preferred_contact TEXT DEFAULT '', tags TEXT DEFAULT '', asking_price REAL, reason_for_selling TEXT DEFAULT '',
+ updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS communications(
+ id INTEGER PRIMARY KEY, property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+ channel TEXT NOT NULL, outcome TEXT DEFAULT '', notes TEXT DEFAULT '', contacted_at TEXT NOT NULL,
+ next_follow_up_date TEXT DEFAULT '', created_by TEXT DEFAULT '', created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS campaigns(
  id INTEGER PRIMARY KEY, name TEXT NOT NULL, channel TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Draft',
  total_records INTEGER NOT NULL DEFAULT 0, cost REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL
@@ -103,4 +115,5 @@ CREATE INDEX IF NOT EXISTS idx_contacts_value ON contacts(value);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(status,due_date);
 CREATE INDEX IF NOT EXISTS idx_comps_property ON comparable_sales(property_id);
 CREATE INDEX IF NOT EXISTS idx_offers_property ON offer_scenarios(property_id,id);
+CREATE INDEX IF NOT EXISTS idx_communications_followup ON communications(next_follow_up_date,property_id);
 """

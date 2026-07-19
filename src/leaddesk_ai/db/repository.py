@@ -35,6 +35,7 @@ class Repository:
         self._ensure_deal_columns()
         self._ensure_buyer_offer_columns()
         self._ensure_comparable_columns()
+        self._ensure_marketing_columns()
         row = self.conn.execute("SELECT version FROM schema_meta LIMIT 1").fetchone()
         if row is None:
             self.conn.execute("INSERT INTO schema_meta(version) VALUES(?)", (SCHEMA_VERSION,))
@@ -96,6 +97,11 @@ class Repository:
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE comparable_sales ADD COLUMN {column} {definition}")
 
+    def _ensure_marketing_columns(self) -> None:
+        existing = {row["name"] for row in self.conn.execute("PRAGMA table_info(properties)")}
+        if "marketing_source" not in existing:
+            self.conn.execute("ALTER TABLE properties ADD COLUMN marketing_source TEXT DEFAULT ''")
+
     def close(self) -> None:
         self.conn.close()
 
@@ -112,6 +118,8 @@ class Repository:
             "open_tasks": q("SELECT COUNT(*) c FROM tasks WHERE status='Open'").fetchone()["c"],
             "buyers": q("SELECT COUNT(*) c FROM buyers WHERE active=1").fetchone()["c"],
             "restricted": q("SELECT COUNT(*) c FROM communication_preferences WHERE internal_dnc=1 OR opt_out=1").fetchone()["c"],
+            "communications": q("SELECT COUNT(*) c FROM communications").fetchone()["c"],
+            "seller_profiles": q("SELECT COUNT(*) c FROM seller_profiles").fetchone()["c"],
         }
 
     def list_properties(self, search: str = "", status: str = "All", priority: str = "All") -> list[sqlite3.Row]:
@@ -680,6 +688,107 @@ class Repository:
         offer_id = int(cur.lastrowid)
         self.audit("add_buyer_offer", "buyer_offer", offer_id, after={"property_id": property_id, "buyer_id": buyer_id, "amount": amount, "status": status})
         return offer_id
+
+
+    SELLER_OCCUPANCIES = ("", "Owner Occupied", "Tenant Occupied", "Vacant", "Unknown")
+    CONTACT_METHODS = ("", "Phone", "Text", "Email", "Mail", "In Person")
+    COMMUNICATION_CHANNELS = ("Call", "Text", "Email", "Voicemail", "Mail", "In Person")
+
+    def seller_profile(self, property_id: int) -> dict[str, Any]:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        row = self.conn.execute("SELECT * FROM seller_profiles WHERE property_id=?", (property_id,)).fetchone()
+        return dict(row) if row else {
+            "property_id": property_id, "motivation_level": 0, "occupancy": "", "timeline": "",
+            "preferred_contact": "", "tags": "", "asking_price": None, "reason_for_selling": ""
+        }
+
+    def save_seller_profile(self, property_id: int, *, motivation_level: int = 0, occupancy: str = "",
+                            timeline: str = "", preferred_contact: str = "", tags: str = "",
+                            asking_price: float | None = None, reason_for_selling: str = "",
+                            marketing_source: str = "") -> None:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        motivation_level = int(motivation_level)
+        if not 0 <= motivation_level <= 10:
+            raise ValueError("Motivation level must be between 0 and 10.")
+        if occupancy not in self.SELLER_OCCUPANCIES:
+            raise ValueError("Invalid occupancy status.")
+        if preferred_contact not in self.CONTACT_METHODS:
+            raise ValueError("Invalid preferred contact method.")
+        if asking_price in (None, ""):
+            asking_price = None
+        else:
+            asking_price = float(asking_price)
+            if asking_price < 0:
+                raise ValueError("Asking price cannot be negative.")
+        stamp = now()
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO seller_profiles(property_id,motivation_level,occupancy,timeline,preferred_contact,tags,asking_price,reason_for_selling,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(property_id) DO UPDATE SET
+                motivation_level=excluded.motivation_level,occupancy=excluded.occupancy,timeline=excluded.timeline,
+                preferred_contact=excluded.preferred_contact,tags=excluded.tags,asking_price=excluded.asking_price,
+                reason_for_selling=excluded.reason_for_selling,updated_at=excluded.updated_at""",
+                (property_id, motivation_level, occupancy, timeline.strip(), preferred_contact, tags.strip(), asking_price, reason_for_selling.strip(), stamp),
+            )
+            self.conn.execute("UPDATE properties SET marketing_source=?, updated_at=? WHERE id=?", (marketing_source.strip(), stamp, property_id))
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, "Seller Profile Updated", f"Motivation: {motivation_level}/10; Occupancy: {occupancy or 'Unknown'}; Source: {marketing_source or 'Unspecified'}", "admin", stamp),
+            )
+        self.audit("save_seller_profile", "property", property_id, after={"motivation_level": motivation_level, "occupancy": occupancy, "marketing_source": marketing_source})
+
+    def add_communication(self, property_id: int, *, channel: str, outcome: str = "", notes: str = "",
+                          contacted_at: str = "", next_follow_up_date: str = "", created_by: str = "admin") -> int:
+        if self.property_details(property_id) is None:
+            raise ValueError("Property not found.")
+        if channel not in self.COMMUNICATION_CHANNELS:
+            raise ValueError("Invalid communication channel.")
+        contacted_at = contacted_at.strip() or now()
+        try:
+            datetime.fromisoformat(contacted_at)
+        except ValueError as exc:
+            raise ValueError("Contact date/time must use ISO format, such as 2026-07-18T14:30:00.") from exc
+        if next_follow_up_date:
+            try:
+                datetime.strptime(next_follow_up_date, "%Y-%m-%d")
+            except ValueError as exc:
+                raise ValueError("Next follow-up date must use YYYY-MM-DD.") from exc
+        stamp = now()
+        with self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO communications(property_id,channel,outcome,notes,contacted_at,next_follow_up_date,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                (property_id, channel, outcome.strip(), notes.strip(), contacted_at, next_follow_up_date, created_by, stamp),
+            )
+            if next_follow_up_date:
+                self.conn.execute("UPDATE properties SET follow_up_date=?, status=CASE WHEN status='New' THEN 'Follow-Up' ELSE status END, updated_at=? WHERE id=?", (next_follow_up_date, stamp, property_id))
+            self.conn.execute(
+                "INSERT INTO activities(property_id,activity_type,details,created_by,created_at) VALUES(?,?,?,?,?)",
+                (property_id, f"{channel} Logged", f"{outcome or 'No outcome'} — {notes}".strip(" —"), created_by, stamp),
+            )
+        communication_id = int(cur.lastrowid)
+        self.audit("add_communication", "communication", communication_id, after={"property_id": property_id, "channel": channel, "outcome": outcome})
+        return communication_id
+
+    def list_communications(self, property_id: int) -> list[sqlite3.Row]:
+        return list(self.conn.execute("SELECT * FROM communications WHERE property_id=? ORDER BY contacted_at DESC,id DESC", (property_id,)))
+
+    def follow_up_queue(self, search: str = "") -> list[sqlite3.Row]:
+        sql = """SELECT p.id,p.address,p.city,p.state,p.zip,p.status,p.priority,p.follow_up_date,p.marketing_source,
+                 COALESCE(o.name,'') owner_name,COALESCE(sp.motivation_level,0) motivation_level,
+                 COALESCE(sp.preferred_contact,'') preferred_contact,COALESCE(sp.timeline,'') timeline
+                 FROM properties p LEFT JOIN owners o ON o.property_id=p.id
+                 LEFT JOIN seller_profiles sp ON sp.property_id=p.id
+                 WHERE p.follow_up_date<>'' AND p.status NOT IN ('Closed','Dead')"""
+        args: list[Any] = []
+        if search.strip():
+            term = f"%{search.strip()}%"
+            sql += " AND (p.address LIKE ? OR o.name LIKE ? OR p.marketing_source LIKE ?)"
+            args.extend([term, term, term])
+        sql += " ORDER BY p.follow_up_date ASC, CASE p.priority WHEN 'Urgent' THEN 1 WHEN 'High' THEN 2 WHEN 'Normal' THEN 3 ELSE 4 END"
+        return list(self.conn.execute(sql, args))
 
     def list_buyer_offers(self, property_id: int) -> list[sqlite3.Row]:
         return list(self.conn.execute(

@@ -81,6 +81,7 @@ class PropertyDialog(QDialog):
         self.layout.addWidget(self.tabs, 1)
         self.tabs.addTab(self.profile_tab(), "Profile")
         self.tabs.addTab(self.workflow_tab(), "Workflow")
+        self.tabs.addTab(self.seller_marketing_tab(), "Seller & Marketing")
         self.tabs.addTab(self.notes_tab(), "Notes")
         self.tabs.addTab(self.tasks_tab(), "Tasks")
         self.tabs.addTab(self.comps_offer_tab(), "Comps & Offer Builder")
@@ -113,6 +114,30 @@ class PropertyDialog(QDialog):
         form.addRow("Status", self.status); form.addRow("Priority", self.priority); form.addRow("Follow-up date", self.follow_up)
         form.addRow("Restrictions", self.internal_dnc); form.addRow("", self.opt_out); layout.addLayout(form)
         save = QPushButton("Save Workflow"); save.clicked.connect(self.save_workflow); layout.addWidget(save); layout.addStretch()
+        return page
+
+    def seller_marketing_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page); form = QFormLayout()
+        self.motivation = QComboBox(); self.motivation.addItems([str(i) for i in range(11)])
+        self.occupancy = QComboBox(); self.occupancy.addItems(self.repo.SELLER_OCCUPANCIES)
+        self.timeline = QLineEdit(); self.timeline.setPlaceholderText("Example: 30 days, 3 months, flexible")
+        self.preferred_contact = QComboBox(); self.preferred_contact.addItems(self.repo.CONTACT_METHODS)
+        self.seller_tags = QLineEdit(); self.seller_tags.setPlaceholderText("Probate, tired landlord, vacant, referral")
+        self.asking_price = QDoubleSpinBox(); self.asking_price.setRange(0, 100000000); self.asking_price.setPrefix("$")
+        self.reason_for_selling = QTextEdit(); self.reason_for_selling.setMaximumHeight(80)
+        self.marketing_source = QLineEdit(); self.marketing_source.setPlaceholderText("Cold Calling, Direct Mail, Referral, PPC, etc.")
+        for label, widget in [("Motivation (0–10)", self.motivation), ("Occupancy", self.occupancy), ("Timeline to sell", self.timeline),
+                              ("Preferred contact", self.preferred_contact), ("Seller tags", self.seller_tags), ("Asking price", self.asking_price),
+                              ("Reason for selling", self.reason_for_selling), ("Marketing source", self.marketing_source)]: form.addRow(label, widget)
+        layout.addLayout(form); save = QPushButton("Save Seller Profile"); save.clicked.connect(self.save_seller_profile); layout.addWidget(save)
+        layout.addWidget(QLabel("Communication history"))
+        self.communication_table = QTableWidget(0, 6); self.communication_table.setHorizontalHeaderLabels(["Date/Time", "Channel", "Outcome", "Notes", "Next Follow-Up", "By"])
+        self.communication_table.setEditTriggers(QAbstractItemView.NoEditTriggers); layout.addWidget(self.communication_table, 1)
+        comm = QFormLayout(); self.comm_channel = QComboBox(); self.comm_channel.addItems(self.repo.COMMUNICATION_CHANNELS)
+        self.comm_outcome = QLineEdit(); self.comm_notes = QLineEdit(); self.comm_contacted_at = QLineEdit(); self.comm_contacted_at.setPlaceholderText("Leave blank for now")
+        self.comm_follow_up = QLineEdit(); self.comm_follow_up.setPlaceholderText("YYYY-MM-DD")
+        for label, widget in [("Channel", self.comm_channel), ("Outcome", self.comm_outcome), ("Notes", self.comm_notes), ("Contact date/time", self.comm_contacted_at), ("Next follow-up", self.comm_follow_up)]: comm.addRow(label, widget)
+        layout.addLayout(comm); add = QPushButton("Log Communication"); add.clicked.connect(self.log_communication); layout.addWidget(add)
         return page
 
     def notes_tab(self):
@@ -350,7 +375,12 @@ class PropertyDialog(QDialog):
             widget.setText(str(d[key] or ''))
         self.status.setCurrentText(d['status'] or 'New'); self.priority.setCurrentText(d['priority'] or 'Normal'); self.follow_up.setText(d['follow_up_date'] or '')
         self.internal_dnc.setChecked(bool(d['internal_dnc'])); self.opt_out.setChecked(bool(d['opt_out']))
-        self.refresh_notes(); self.refresh_tasks(); self.refresh_comps(); self.refresh_offer_scenarios(); self.refresh_deals(); self.refresh_buyer_matches(); self.refresh_offers(); self.refresh_activity()
+        seller = self.repo.seller_profile(self.property_id)
+        self.motivation.setCurrentText(str(seller.get('motivation_level') or 0)); self.occupancy.setCurrentText(str(seller.get('occupancy') or ''))
+        self.timeline.setText(str(seller.get('timeline') or '')); self.preferred_contact.setCurrentText(str(seller.get('preferred_contact') or ''))
+        self.seller_tags.setText(str(seller.get('tags') or '')); self.asking_price.setValue(float(seller.get('asking_price') or 0))
+        self.reason_for_selling.setPlainText(str(seller.get('reason_for_selling') or '')); self.marketing_source.setText(str(d['marketing_source'] or ''))
+        self.refresh_notes(); self.refresh_tasks(); self.refresh_comps(); self.refresh_offer_scenarios(); self.refresh_deals(); self.refresh_buyer_matches(); self.refresh_offers(); self.refresh_communications(); self.refresh_activity()
 
     def save_profile(self):
         try:
@@ -359,6 +389,28 @@ class PropertyDialog(QDialog):
                 owner_name=self.owner_name.text(), mailing_address=self.mailing_address.text(), phone=self.phone.text(), email=self.email.text())
             self.refresh_all(); QMessageBox.information(self, "Saved", "Property and owner profile saved.")
         except ValueError as exc: QMessageBox.warning(self, "Cannot save", str(exc))
+
+    def save_seller_profile(self):
+        try:
+            self.repo.save_seller_profile(self.property_id, motivation_level=int(self.motivation.currentText()), occupancy=self.occupancy.currentText(),
+                timeline=self.timeline.text(), preferred_contact=self.preferred_contact.currentText(), tags=self.seller_tags.text(),
+                asking_price=self.asking_price.value() or None, reason_for_selling=self.reason_for_selling.toPlainText(), marketing_source=self.marketing_source.text())
+            self.refresh_activity(); QMessageBox.information(self, "Saved", "Seller and marketing profile saved.")
+        except ValueError as exc: QMessageBox.warning(self, "Cannot save", str(exc))
+
+    def log_communication(self):
+        try:
+            self.repo.add_communication(self.property_id, channel=self.comm_channel.currentText(), outcome=self.comm_outcome.text(), notes=self.comm_notes.text(),
+                contacted_at=self.comm_contacted_at.text(), next_follow_up_date=self.comm_follow_up.text().strip())
+            self.comm_outcome.clear(); self.comm_notes.clear(); self.comm_contacted_at.clear(); self.comm_follow_up.clear(); self.refresh_communications(); self.refresh_all()
+        except ValueError as exc: QMessageBox.warning(self, "Cannot log communication", str(exc))
+
+    def refresh_communications(self):
+        rows = self.repo.list_communications(self.property_id); self.communication_table.setRowCount(len(rows))
+        for r, item in enumerate(rows):
+            for c, value in enumerate([item['contacted_at'], item['channel'], item['outcome'], item['notes'], item['next_follow_up_date'], item['created_by']]):
+                self.communication_table.setItem(r, c, QTableWidgetItem(str(value or '')))
+        self.communication_table.resizeColumnsToContents()
 
     def save_workflow(self):
         try:
@@ -500,6 +552,36 @@ class PropertiesPage(QWidget):
             QMessageBox.critical(self, "Import failed", str(exc))
 
 
+class MarketingHubPage(QWidget):
+    def __init__(self, repo: Repository, dashboard: DashboardPage):
+        super().__init__(); self.repo = repo; self.dashboard = dashboard
+        layout = QVBoxLayout(self); title = QLabel("Marketing Hub & Follow-Up Queue"); title.setObjectName("pageTitle"); layout.addWidget(title)
+        bar = QHBoxLayout(); self.search = QLineEdit(); self.search.setPlaceholderText("Search owner, property, or marketing source"); self.search.returnPressed.connect(self.refresh)
+        refresh = QPushButton("Refresh Queue"); refresh.clicked.connect(self.refresh); bar.addWidget(self.search, 1); bar.addWidget(refresh); layout.addLayout(bar)
+        self.table = QTableWidget(0, 11); self.table.setHorizontalHeaderLabels(["ID","Follow-Up","Priority","Owner","Property","Status","Motivation","Preferred Contact","Timeline","Source","Due Status"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows); self.table.setEditTriggers(QAbstractItemView.NoEditTriggers); self.table.doubleClicked.connect(self.open_selected); layout.addWidget(self.table, 1)
+        self.summary = QLabel(); layout.addWidget(self.summary); self.refresh()
+
+    def selected_property_id(self):
+        row = self.table.currentRow(); return int(self.table.item(row,0).text()) if row >= 0 else None
+
+    def refresh(self):
+        from datetime import date
+        rows = self.repo.follow_up_queue(self.search.text()); today = date.today().isoformat(); self.table.setRowCount(len(rows)); overdue = due_today = 0
+        for r, item in enumerate(rows):
+            due = item['follow_up_date']; due_status = "Overdue" if due < today else ("Due Today" if due == today else "Upcoming")
+            overdue += int(due_status == "Overdue"); due_today += int(due_status == "Due Today")
+            address = ", ".join(x for x in [item['address'], item['city'], item['state'], item['zip']] if x)
+            values = [item['id'], due, item['priority'], item['owner_name'], address, item['status'], f"{item['motivation_level']}/10", item['preferred_contact'], item['timeline'], item['marketing_source'], due_status]
+            for c, value in enumerate(values): self.table.setItem(r,c,QTableWidgetItem(str(value or '')))
+        self.table.resizeColumnsToContents(); self.summary.setText(f"Queue: {len(rows)} • Overdue: {overdue} • Due today: {due_today}")
+
+    def open_selected(self):
+        property_id = self.selected_property_id()
+        if property_id and PropertyDialog(self.repo, property_id, self).exec(): pass
+        self.refresh(); self.dashboard.refresh()
+
+
 class BuyerEditorDialog(QDialog):
     def __init__(self, repo: Repository, buyer_id: int | None = None, parent=None):
         super().__init__(parent); self.repo = repo; self.buyer_id = buyer_id
@@ -586,21 +668,23 @@ class MainWindow(QMainWindow):
     def __init__(self, repo: Repository):
         super().__init__()
         self.repo = repo
-        self.setWindowTitle("LeadDesk AI 3.5 — Comps & Offer Builder")
+        self.setWindowTitle("LeadDesk AI 3.6 — Seller CRM & Marketing Hub")
         self.resize(1320, 800)
         root = QWidget()
         self.setCentralWidget(root)
         layout = QHBoxLayout(root)
         self.nav = QListWidget()
-        self.nav.addItems(["Dashboard", "Lead Manager", "Buyer CRM", "Migration & Backup", "About"])
+        self.nav.addItems(["Dashboard", "Lead Manager", "Buyer CRM", "Marketing Hub", "Migration & Backup", "About"])
         self.nav.setFixedWidth(210)
         self.pages = QStackedWidget()
         self.dashboard = DashboardPage(repo)
         self.properties = PropertiesPage(repo, self.dashboard)
         self.buyers = BuyersPage(repo, self.dashboard)
+        self.marketing = MarketingHubPage(repo, self.dashboard)
         self.pages.addWidget(self.dashboard)
         self.pages.addWidget(self.properties)
         self.pages.addWidget(self.buyers)
+        self.pages.addWidget(self.marketing)
         self.pages.addWidget(self.tools_page())
         self.pages.addWidget(self.about_page())
         self.nav.currentRowChanged.connect(self.change_page)
@@ -623,6 +707,8 @@ class MainWindow(QMainWindow):
             self.properties.refresh()
         if index == 2:
             self.buyers.refresh()
+        if index == 3:
+            self.marketing.refresh()
 
     def tools_page(self):
         page = QWidget()
@@ -645,11 +731,11 @@ class MainWindow(QMainWindow):
     def about_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        title = QLabel("LeadDesk AI 3.5 Comps & Offer Builder")
+        title = QLabel("LeadDesk AI 3.6 Seller CRM & Marketing Hub")
         title.setObjectName("pageTitle")
         layout.addWidget(title)
         label = QLabel(
-            "Lead CRM • Property Workspace • Deal Analyzer • Buyer CRM • buy-box matching • offer pipeline • tasks • activity timeline • tested backups\n\n"
+            "Lead CRM • Seller CRM • Marketing Hub • Follow-Up Queue • Communication History • Deal Analyzer • Buyer CRM • Comps • tested backups\n\n"
             "This application supports organization and analysis. It does not provide legal advice or automatically authorize calls, texts, emails, contracts, or negotiations."
         )
         label.setWordWrap(True)
